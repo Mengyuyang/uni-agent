@@ -10,7 +10,7 @@
 #   bash examples/blackbox_recipes/claude_code/build_tool.sh
 #   bash examples/blackbox_recipes/claude_code/build_tool.sh --npm-registry https://registry.npmmirror.com
 #   bash examples/blackbox_recipes/claude_code/build_tool.sh --tool-version latest
-#   bash examples/blackbox_recipes/claude_code/build_tool.sh --registry swr.cn-east-3.myhuaweicloud.com/openyuanrong
+#   bash examples/blackbox_recipes/claude_code/build_tool.sh --registry 7.227.53.47:8091/openyuanrong
 #
 set -euo pipefail
 

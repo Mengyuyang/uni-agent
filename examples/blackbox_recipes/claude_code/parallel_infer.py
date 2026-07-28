@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # ── Recipe-specific constants (only these two differ between recipes) ──────
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
 _CONFIG_NAME = "claude_code_megatron_v1"
-_DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest"
+_DEFAULT_TOOL_IMAGE = "7.227.53.47:8091/openyuanrong/claude-code-tool:latest"
 
 
 # =====================================================================
@@ -360,7 +360,7 @@ def main():
     parser.add_argument("--tool-image", type=str, default=_DEFAULT_TOOL_IMAGE)
     parser.add_argument("--run-timeout", type=int, default=7200)
     parser.add_argument("--proxy-port", type=int, default=38197)
-    parser.add_argument("--max-turns", type=int, default=100)
+    parser.add_argument("--max-turns", type=int, default=40)
     args = parser.parse_args()
 
     # Set before ray.init so runner Ray tasks inherit it.

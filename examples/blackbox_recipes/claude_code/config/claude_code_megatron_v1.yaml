@@ -63,7 +63,7 @@ actor_rollout_ref:
             dispatch_mode: ray_task
             max_concurrent_sessions: 32
             runner_kwargs:
-              tool_image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest
+              tool_image: 7.227.53.47:8091/openyuanrong/claude-code-tool:latest
               run_timeout: 3600
               conda_env: testbed
               proxy_port: 38197

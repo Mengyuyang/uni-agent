@@ -54,7 +54,8 @@ config) lives in this directory and does not depend on `mini_swe_agent/`.
 
 ## Prerequisites
 
-1. **OpenYuanrong** - set `OPENYUANRONG_SERVER_ADDRESS` and `OPENYUANRONG_TOKEN`.
+1. **OpenYuanrong/AKernel** - set `OPENYUANRONG_SERVER_ADDRESS` and `OPENYUANRONG_TOKEN`;
+   `AKERNEL_SERVER_ADDRESS` and `AKERNEL_TOKEN` are accepted as aliases.
 2. **Tool image** — build the claude-code tool image and push it to a remote
    registry if the sandbox service cannot access local Docker images.
 
@@ -78,7 +79,7 @@ bash examples/blackbox_recipes/claude_code/build_tool.sh --npm-registry https://
 bash examples/blackbox_recipes/claude_code/build_tool.sh --tool-version latest
 
 # Build and push to a remote registry.
-bash examples/blackbox_recipes/claude_code/build_tool.sh --registry swr.cn-east-3.myhuaweicloud.com/openyuanrong
+bash examples/blackbox_recipes/claude_code/build_tool.sh --registry 7.227.53.47:8091/openyuanrong
 ```
 
 ### Build Environment Variables
@@ -97,7 +98,7 @@ After pushing, point training at it with `CLAUDE_CODE_TOOL_IMAGE`.
 ```bash
 OPENYUANRONG_SERVER_ADDRESS="6.2.179.37:8888" \
 OPENYUANRONG_TOKEN="<token>" \
-CLAUDE_CODE_TOOL_IMAGE=swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest \
+CLAUDE_CODE_TOOL_IMAGE=7.227.53.47:8091/openyuanrong/claude-code-tool:latest \
 MODEL_PATH=~/models/Qwen3.5-9B \
 bash examples/blackbox_recipes/claude_code/run_train.sh
 ```
@@ -112,10 +113,10 @@ agent_runner_fqn: examples.blackbox_recipes.claude_code.claude_code_runner.claud
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_MAX_TURNS` | `100` | `claude --max-turns` (the agent's turn budget); read by the runner from the `AGENT_MAX_TURNS` env var |
+| `AGENT_MAX_TURNS` | `40` | `claude --max-turns` (the agent's turn budget); read by the runner from the `AGENT_MAX_TURNS` env var |
 | `SWE_AGENT_EVAL_TIMEOUT` | `600` | Reward evaluation timeout (seconds) |
 | `SWE_AGENT_RUN_TIMEOUT` | `7200` | Max wall time for the claude process in the sandbox |
-| `CLAUDE_CODE_TOOL_IMAGE` | `swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest` | Sidecar tool image |
+| `CLAUDE_CODE_TOOL_IMAGE` | `7.227.53.47:8091/openyuanrong/claude-code-tool:latest` | Sidecar tool image |
 | `CLAUDE_CODE_PROXY_PORT` | `38197` | Sandbox-local reverse tunnel port; passed to OpenYuanrong as `proxy_port` and used in `ANTHROPIC_BASE_URL` |
 | `CONDA_ENV` | `testbed` | Conda env activated inside the sandbox before running claude |
 
@@ -123,4 +124,4 @@ agent_runner_fqn: examples.blackbox_recipes.claude_code.claude_code_runner.claud
 `multi_turn.max_assistant_turns` is not enforced on the blackbox rollout path
 (`AgentFrameworkRolloutAdapter`) — claude runs to its own `--max-turns` inside
 the sandbox and the gateway counts the turns afterward — so it is not exposed as
-a separate knob. A value of `1` would cripple the agent, hence the default `100`.
+a separate knob. A value of `1` would cripple the agent, hence the default `40`.

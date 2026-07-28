@@ -28,7 +28,7 @@ from uni_agent.sandbox import Sandbox, SandboxConfig, build_sandbox
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest"
+DEFAULT_TOOL_IMAGE = "7.227.53.47:8091/openyuanrong/claude-code-tool:latest"
 TOOL_TARGET = "/opt/claude-code"
 DEFAULT_GATEWAY_PROXY_PORT = 38197
 
@@ -332,7 +332,7 @@ async def claude_code_runner(
 
         claude_base_url = rewrite_gateway_url(gateway_url, proxy_port=gateway_proxy_port, strip_v1=True)
         logger.info("[sample %d] claude-code base_url=%s", sample_index, claude_base_url)
-        max_turns = int(os.environ.get("AGENT_MAX_TURNS", "100"))
+        max_turns = int(os.environ.get("AGENT_MAX_TURNS", "40"))
         agent_cmd = build_claude_command(
             task=task,
             base_url=claude_base_url,
