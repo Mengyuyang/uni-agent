@@ -113,7 +113,7 @@ agent_runner_fqn: examples.blackbox_recipes.claude_code.claude_code_runner.claud
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_MAX_TURNS` | `40` | `claude --max-turns` (the agent's turn budget); read by the runner from the `AGENT_MAX_TURNS` env var |
+| `AGENT_MAX_TURNS` | `100` | `claude --max-turns` (the agent's turn budget); read by the runner from the `AGENT_MAX_TURNS` env var |
 | `SWE_AGENT_EVAL_TIMEOUT` | `600` | Reward evaluation timeout (seconds) |
 | `SWE_AGENT_RUN_TIMEOUT` | `7200` | Max wall time for the claude process in the sandbox |
 | `CLAUDE_CODE_TOOL_IMAGE` | `7.227.53.47:8091/openyuanrong/claude-code-tool:latest` | Sidecar tool image |
@@ -124,4 +124,4 @@ agent_runner_fqn: examples.blackbox_recipes.claude_code.claude_code_runner.claud
 `multi_turn.max_assistant_turns` is not enforced on the blackbox rollout path
 (`AgentFrameworkRolloutAdapter`) — claude runs to its own `--max-turns` inside
 the sandbox and the gateway counts the turns afterward — so it is not exposed as
-a separate knob. A value of `1` would cripple the agent, hence the default `40`.
+a separate knob. A value of `1` would cripple the agent, hence the default `100`.

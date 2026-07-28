@@ -360,7 +360,7 @@ def main():
     parser.add_argument("--tool-image", type=str, default=_DEFAULT_TOOL_IMAGE)
     parser.add_argument("--run-timeout", type=int, default=7200)
     parser.add_argument("--proxy-port", type=int, default=38197)
-    parser.add_argument("--max-turns", type=int, default=40)
+    parser.add_argument("--max-turns", type=int, default=100)
     args = parser.parse_args()
 
     # Set before ray.init so runner Ray tasks inherit it.

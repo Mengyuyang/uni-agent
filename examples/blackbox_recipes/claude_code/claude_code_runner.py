@@ -332,7 +332,7 @@ async def claude_code_runner(
 
         claude_base_url = rewrite_gateway_url(gateway_url, proxy_port=gateway_proxy_port, strip_v1=True)
         logger.info("[sample %d] claude-code base_url=%s", sample_index, claude_base_url)
-        max_turns = int(os.environ.get("AGENT_MAX_TURNS", "40"))
+        max_turns = int(os.environ.get("AGENT_MAX_TURNS", "100"))
         agent_cmd = build_claude_command(
             task=task,
             base_url=claude_base_url,
