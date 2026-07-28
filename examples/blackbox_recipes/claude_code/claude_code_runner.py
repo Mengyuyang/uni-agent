@@ -15,6 +15,7 @@ import logging
 import os
 import shlex
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -111,10 +112,25 @@ def _decode_metadata_list(value) -> list[str]:
     return [str(value)]
 
 
+def _get_task_config(tools_kwargs: dict | None) -> dict:
+    tools_kwargs = tools_kwargs or {}
+    task_config = tools_kwargs.get("task", {})
+    return dict(task_config) if isinstance(task_config, Mapping) else {}
+
+
+def _get_reward_metadata(tools_kwargs: dict | None) -> dict:
+    tools_kwargs = tools_kwargs or {}
+    reward_metadata = ((tools_kwargs.get("reward") or {}).get("metadata") or {})
+    if isinstance(reward_metadata, Mapping) and reward_metadata:
+        return dict(reward_metadata)
+    task_metadata = _get_task_config(tools_kwargs).get("metadata", {})
+    return dict(task_metadata) if isinstance(task_metadata, Mapping) else {}
+
+
 def build_claude_task(raw_prompt, tools_kwargs: dict | None = None) -> str:
     tools_kwargs = tools_kwargs or {}
     task = extract_task(raw_prompt)
-    metadata = (tools_kwargs.get("reward") or {}).get("metadata") or {}
+    metadata = _get_reward_metadata(tools_kwargs)
     issue = metadata.get("problem_statement") or _extract_issue_text(task)
     tests = _decode_metadata_list(metadata.get("FAIL_TO_PASS"))
     if not tests:
@@ -248,9 +264,13 @@ async def claude_code_runner(
 
     task = build_claude_task(raw_prompt, tools_kwargs)
     env_config = tools_kwargs.get("env", {})
+    if not env_config:
+        env_config = _get_task_config(tools_kwargs).get("sandbox", {})
     image = extract_image(env_config)
     if not image:
-        raise ValueError(f"No Docker image found in tools_kwargs.env for sample {sample_index}")
+        raise ValueError(
+            f"No Docker image found in tools_kwargs.env or tools_kwargs.task.sandbox for sample {sample_index}"
+        )
 
     gateway_url = session.base_url
     if not gateway_url:
@@ -299,7 +319,9 @@ async def claude_code_runner(
         logger.info("[sample %d] reward done score=%s resolved=%s", sample_index, score, eval_result.get("resolved"))
 
         reward_info = {
+            "reward": score,
             "reward_score": score,
+            "acc": score,
             "claude_code_exit_code": result.exit_code,
             **eval_result,
         }

@@ -1,8 +1,10 @@
-"""SWEBench-specific dataset that injects verl-standard reward fields.
+"""SWE-bench-like dataset that injects verl-standard reward fields.
 
 Self-contained for the claude-code recipe; mirrors the mini-swe-agent dataset
 so claude_code/ does not depend on mini_swe_agent/.
 """
+
+from collections.abc import Mapping
 
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
@@ -30,8 +32,12 @@ class SWEBenchDataset(RLHFDataset):
         extra_info = row_dict.get("extra_info", {})
         tools_kwargs = extra_info.get("tools_kwargs", {})
         reward_config = tools_kwargs.get("reward", {})
+        task_config = tools_kwargs.get("task", {})
+        task_config = task_config if isinstance(task_config, Mapping) else {}
+        task_metadata = task_config.get("metadata", {}) if isinstance(task_config.get("metadata", {}), Mapping) else {}
 
-        row_dict.setdefault("data_source", reward_config.get("name", "unknown"))
-        row_dict.setdefault("reward_model", {"ground_truth": {}})
+        data_source = row_dict.get("data_source") or reward_config.get("name") or task_config.get("name") or "unknown"
+        row_dict["data_source"] = data_source
+        row_dict.setdefault("reward_model", {"ground_truth": reward_config.get("metadata") or task_metadata})
 
         return row_dict

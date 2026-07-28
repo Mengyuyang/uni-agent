@@ -911,3 +911,21 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
         (0.42, {"acc": 1.0, "format": 0.8}),
         (0.42, {"acc": 1.0, "format": 0.8}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_score_from_reward_info_accepts_reward_score_alias():
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=_FakeGatewayManager({}),
+        n=1,
+        val_n=1,
+    )
+
+    annotations = framework._score_from_reward_info(
+        [
+            _trajectory(reward_info={"reward_score": 0.75, "source": "blackbox-runner"}),
+        ]
+    )
+
+    assert annotations == [(0.75, {"source": "blackbox-runner"})]

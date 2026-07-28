@@ -793,11 +793,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     ) -> list[tuple[float, dict[str, object]]] | None:
         """Score from the reward the runner posted to the session, if any.
 
-        reward_score = the posted ``reward``; anything else posted (e.g. ``acc``) rides
-        along as reward_extra_info. See ``task_runner._post_reward_info`` for what's posted.
+        reward_score = the posted ``reward``. Older runners posted
+        ``reward_score`` instead; accept that alias so already-built blackbox
+        runners do not silently fall back to zero-reward trajectories.
         """
         reward_info = dict(session_trajectories[-1].reward_info or {})
         reward = reward_info.pop("reward", None)
+        if reward is None:
+            reward = reward_info.pop("reward_score", None)
         if reward is None:
             return None
         return [(float(reward), reward_info)] * len(session_trajectories)
