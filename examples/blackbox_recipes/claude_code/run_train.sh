@@ -100,6 +100,7 @@ MAX_TURNS="${MAX_TURNS:-${AGENT_MAX_TURNS}}"
 if [[ "${RUNNER}" == "claude_code" ]]; then
     AGENT_RUNNER_FQN="examples.blackbox_recipes.claude_code.claude_code_runner.claude_code_runner"
     CLAUDE_CODE_TOOL_IMAGE="${CLAUDE_CODE_TOOL_IMAGE:-7.227.53.47:8091/openyuanrong/claude-code-tool:latest}"
+    CLAUDE_CODE_PROXY_PORT="${CLAUDE_CODE_PROXY_PORT:-38197}"
 else
     echo "Unknown RUNNER=${RUNNER}; this recipe currently supports claude_code only" >&2
     exit 1
@@ -118,6 +119,7 @@ RUNNER_ARGS=(
     "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.claude_code.runner_kwargs.tool_image=${CLAUDE_CODE_TOOL_IMAGE}"
     "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.claude_code.runner_kwargs.run_timeout=${SWE_AGENT_RUN_TIMEOUT}"
     "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.claude_code.runner_kwargs.conda_env=${CONDA_ENV}"
+    "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.claude_code.runner_kwargs.proxy_port=${CLAUDE_CODE_PROXY_PORT}"
 )
 
 # ── AKernel (remote sandbox) ─────────────────────────────────────────────
@@ -143,6 +145,7 @@ VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}"
 export AGENT_MAX_TURNS
 export SWE_AGENT_EVAL_TIMEOUT="${SWE_AGENT_EVAL_TIMEOUT:-600}"
 export CLAUDE_CODE_TOOL_IMAGE
+export CLAUDE_CODE_PROXY_PORT
 export SWE_AGENT_RUN_TIMEOUT
 export CONDA_ENV
 export GATEWAY_COUNT
@@ -162,6 +165,7 @@ echo "Val data:    ${VAL_DATA}"
 echo "Engine:      ${ENGINE} (gen_tp=${GEN_TP}, train_tp=${TRAIN_TP})"
 echo "Runner:      ${RUNNER}"
 echo "Tool image:  ${CLAUDE_CODE_TOOL_IMAGE}"
+echo "Proxy port:  ${CLAUDE_CODE_PROXY_PORT}"
 echo "Turns:       agent_max_turns=${AGENT_MAX_TURNS}"
 echo "Batch:       n=${N}, mini_bsz=${PPO_MINI_BATCH_SIZE}"
 echo "Sequence:    prompt=${PROMPT_LENGTH}, response=${RESPONSE_LENGTH}"
@@ -198,6 +202,7 @@ env_vars = {
         "SWE_AGENT_EVAL_TIMEOUT",
         "SWE_AGENT_RUN_TIMEOUT",
         "CLAUDE_CODE_TOOL_IMAGE",
+        "CLAUDE_CODE_PROXY_PORT",
         "CONDA_ENV",
         "GATEWAY_COUNT",
 	"VERL_LOGGING_LEVEL",
