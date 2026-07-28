@@ -39,21 +39,13 @@ def _load_sandbox_module() -> Any:
     if _sdk_initialized:
         return sys.modules["openyuanrong_sandbox_sdk"]
 
-    server = os.getenv("OPENYUANRONG_SERVER_ADDRESS") or os.getenv("AKERNEL_SERVER_ADDRESS")
-    token = os.getenv("OPENYUANRONG_TOKEN") or os.getenv("AKERNEL_TOKEN")
+    server = os.getenv("OPENYUANRONG_SERVER_ADDRESS")
+    token = os.getenv("OPENYUANRONG_TOKEN")
     if not server or not token:
         raise ValueError(
-            "OPENYUANRONG_SERVER_ADDRESS/OPENYUANRONG_TOKEN or AKERNEL_SERVER_ADDRESS/AKERNEL_TOKEN "
-            "environment variables must be set for sandbox"
+            "OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN environment variables must be set for sandbox"
         )
-    tunnel_ssl_verify = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY") or os.getenv("AKERNEL_TUNNEL_SSL_VERIFY", "0")
-    os.environ["OPENYUANRONG_SERVER_ADDRESS"] = server
-    os.environ["OPENYUANRONG_TOKEN"] = token
-    os.environ["OPENYUANRONG_TUNNEL_SSL_VERIFY"] = tunnel_ssl_verify
-    os.environ["AKERNEL_SERVER_ADDRESS"] = server
-    os.environ["AKERNEL_TOKEN"] = token
-    os.environ["AKERNEL_TUNNEL_SSL_VERIFY"] = tunnel_ssl_verify
-    os.environ["TUNNEL_SSL_VERIFY"] = tunnel_ssl_verify
+    os.environ["TUNNEL_SSL_VERIFY"] = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY", "0")
 
     if os.getenv("USE_OPENYUANRONG_SDK", "0") == "1":
         try:
