@@ -123,6 +123,7 @@ def _load_config(
     max_concurrent_sessions: int,
     tool_image: str | None,
     run_timeout: int,
+    proxy_port: int,
 ) -> Any:
     """Compose the recipe's training config and override inference fields.
 
@@ -163,6 +164,7 @@ def _load_config(
     if tool_image:
         runner_cfg.runner_kwargs.tool_image = tool_image
     runner_cfg.runner_kwargs.run_timeout = run_timeout
+    runner_cfg.runner_kwargs.proxy_port = proxy_port
 
     config.trainer.nnodes = nnodes
     config.trainer.n_gpus_per_node = n_gpus_per_node
@@ -269,6 +271,7 @@ def run_inference(
     max_concurrent_sessions: int,
     tool_image: str | None,
     run_timeout: int,
+    proxy_port: int,
 ) -> dict[str, Any]:
     if not ray.is_initialized():
         ray.init()
@@ -288,6 +291,7 @@ def run_inference(
         max_concurrent_sessions=max_concurrent_sessions,
         tool_image=tool_image,
         run_timeout=run_timeout,
+        proxy_port=proxy_port,
     )
 
     samples = load_swe_dataset(data_path, max_samples=max_samples)
@@ -355,11 +359,13 @@ def main():
     parser.add_argument("--max-concurrent-sessions", type=int, default=8)
     parser.add_argument("--tool-image", type=str, default=_DEFAULT_TOOL_IMAGE)
     parser.add_argument("--run-timeout", type=int, default=7200)
+    parser.add_argument("--proxy-port", type=int, default=38197)
     parser.add_argument("--max-turns", type=int, default=100)
     args = parser.parse_args()
 
     # Set before ray.init so runner Ray tasks inherit it.
     os.environ["AGENT_MAX_TURNS"] = str(args.max_turns)
+    os.environ["CLAUDE_CODE_PROXY_PORT"] = str(args.proxy_port)
 
     run_inference(
         model_path=args.model_path,
@@ -378,6 +384,7 @@ def main():
         max_concurrent_sessions=args.max_concurrent_sessions,
         tool_image=args.tool_image,
         run_timeout=args.run_timeout,
+        proxy_port=args.proxy_port,
     )
 
 

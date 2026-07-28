@@ -34,6 +34,7 @@ MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-8}"
 # ── Agent parameters ─────────────────────────────────────────────────────
 AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-100}"
 CLAUDE_CODE_TOOL_IMAGE="${CLAUDE_CODE_TOOL_IMAGE:-swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest}"
+CLAUDE_CODE_PROXY_PORT="${CLAUDE_CODE_PROXY_PORT:-38197}"
 SWE_AGENT_RUN_TIMEOUT="${SWE_AGENT_RUN_TIMEOUT:-7200}"
 
 # ── openYuanrong (remote sandbox) ─────────────────────────────────────────────
@@ -45,6 +46,7 @@ export OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
 export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"
 export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.7}"
 export AGENT_MAX_TURNS
+export CLAUDE_CODE_PROXY_PORT
 export SWE_AGENT_EVAL_TIMEOUT="${SWE_AGENT_EVAL_TIMEOUT:-600}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/verl:${PYTHONPATH:-}"
 
@@ -54,6 +56,7 @@ echo "Data:        ${DATA_PATH}"
 echo "Max samples: ${MAX_SAMPLES}"
 echo "Engine:      ${ENGINE} (TP=${TP})"
 echo "Tool image:  ${CLAUDE_CODE_TOOL_IMAGE}"
+echo "Proxy port:  ${CLAUDE_CODE_PROXY_PORT}"
 echo "Batch:       n=${N}, gateway=${GATEWAY_COUNT}, max_sessions=${MAX_CONCURRENT_SESSIONS}"
 echo "====================================="
 
@@ -74,4 +77,5 @@ python examples/blackbox_recipes/claude_code/parallel_infer.py \
     --max-concurrent-sessions "${MAX_CONCURRENT_SESSIONS}" \
     --tool-image "${CLAUDE_CODE_TOOL_IMAGE}" \
     --run-timeout "${SWE_AGENT_RUN_TIMEOUT}" \
+    --proxy-port "${CLAUDE_CODE_PROXY_PORT}" \
     --max-turns "${AGENT_MAX_TURNS}"

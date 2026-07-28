@@ -30,6 +30,31 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest"
 TOOL_TARGET = "/opt/claude-code"
+DEFAULT_GATEWAY_PROXY_PORT = 38197
+
+
+def read_gateway_proxy_port() -> int:
+    """Read the sandbox-local gateway proxy port used by OpenYuanrong."""
+    raw = os.getenv("CLAUDE_CODE_PROXY_PORT")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_GATEWAY_PROXY_PORT
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"CLAUDE_CODE_PROXY_PORT must be an integer, got {raw!r}") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(f"CLAUDE_CODE_PROXY_PORT must be in [1, 65535], got {port}")
+    return port
+
+
+def validate_gateway_proxy_port(port: int | str, *, source: str = "proxy_port") -> int:
+    try:
+        value = int(port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source} must be an integer, got {port!r}") from exc
+    if not 1 <= value <= 65535:
+        raise ValueError(f"{source} must be in [1, 65535], got {value}")
+    return value
 
 
 def extract_upstream(gateway_url: str) -> str:
@@ -40,7 +65,7 @@ def extract_upstream(gateway_url: str) -> str:
 
 def rewrite_gateway_url(
     gateway_url: str,
-    proxy_port: int = 38197,
+    proxy_port: int = DEFAULT_GATEWAY_PROXY_PORT,
     *,
     strip_v1: bool = False,
 ) -> str:
@@ -225,16 +250,21 @@ async def _create_claude_sandbox(
     image: str,
     sidecar_image: str,
     gateway_url: str,
+    proxy_port: int,
 ) -> Sandbox:
     upstream = extract_upstream(gateway_url) if gateway_url else None
+    sandbox_kwargs = {
+        "mounts": [{"target": TOOL_TARGET, "image_url": sidecar_image}],
+    }
+    if upstream:
+        sandbox_kwargs["upstream"] = upstream
+        sandbox_kwargs["proxy_port"] = proxy_port
     config = SandboxConfig(
         provider=os.getenv("SANDBOX_PROVIDER", "openyuanrong"),
         image=image,
-        sandbox_kwargs={
-            "mounts": [{"target": TOOL_TARGET, "image_url": sidecar_image}],
-            "upstream": upstream,
-        },
+        sandbox_kwargs=sandbox_kwargs,
     )
+    logger.info("creating claude-code sandbox upstream=%s proxy_port=%s", upstream, proxy_port)
     sandbox = build_sandbox(config)
     await sandbox.__aenter__(retry=10)
     return sandbox
@@ -249,6 +279,7 @@ async def claude_code_runner(
     tool_image: str = DEFAULT_TOOL_IMAGE,
     run_timeout: int = 7200,
     conda_env: str = "testbed",
+    proxy_port: int | str | None = None,
     **kwargs,
 ) -> None:
     """Run Claude Code inside a sandbox with sidecar tool mount.
@@ -276,10 +307,16 @@ async def claude_code_runner(
     if not gateway_url:
         raise ValueError(f"gateway_url is empty for sample {sample_index}")
 
+    gateway_proxy_port = (
+        read_gateway_proxy_port()
+        if proxy_port is None
+        else validate_gateway_proxy_port(proxy_port, source="runner_kwargs.proxy_port")
+    )
     sandbox = await _create_claude_sandbox(
         image=image,
         sidecar_image=tool_image,
         gateway_url=gateway_url,
+        proxy_port=gateway_proxy_port,
     )
 
     try:
@@ -293,7 +330,8 @@ async def claude_code_runner(
                     setup_result.stdout + setup_result.stderr,
                 )
 
-        claude_base_url = rewrite_gateway_url(gateway_url, strip_v1=True)
+        claude_base_url = rewrite_gateway_url(gateway_url, proxy_port=gateway_proxy_port, strip_v1=True)
+        logger.info("[sample %d] claude-code base_url=%s", sample_index, claude_base_url)
         max_turns = int(os.environ.get("AGENT_MAX_TURNS", "100"))
         agent_cmd = build_claude_command(
             task=task,
