@@ -18,19 +18,26 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DATA_SOURCE_ALIASES = {
-    "swe_bench": "swe_bench",
-    "swebench": "swe_bench",
-    "princeton-nlp/swe-bench_verified": "swe_bench",
-    "swe_rebench": "swe_rebench",
-    "swerebench": "swe_rebench",
-    "nebius/swe-rebench": "swe_rebench",
+_SWE_BENCH_ALIASES = {
+    "swe_bench",
+    "swebench",
+    "princeton-nlp/swe-bench_verified",
+}
+_SWE_REBENCH_ALIASES = {
+    "swe_rebench",
+    "swerebench",
+    "nebius/swe-rebench",
 }
 
 
 def _normalize_data_source(data_source: str) -> str:
     normalized = data_source.strip().lower()
-    return _DATA_SOURCE_ALIASES.get(normalized, normalized)
+    if normalized in _SWE_BENCH_ALIASES:
+        return "swe_bench"
+    elif normalized in _SWE_REBENCH_ALIASES:
+        return "swe_rebench"
+    else:
+        return normalized
 
 
 def build_reward_context(tools_kwargs: dict) -> tuple[dict[str, Any], int]:

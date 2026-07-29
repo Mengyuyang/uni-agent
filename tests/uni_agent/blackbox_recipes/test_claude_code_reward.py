@@ -13,8 +13,10 @@ from examples.blackbox_recipes.claude_code.reward import build_reward_context, e
     ("data_source", "module_name"),
     [
         ("swe_bench", "uni_agent.tasks.swe_bench.reward"),
+        ("swebench", "uni_agent.tasks.swe_bench.reward"),
         ("princeton-nlp/SWE-bench_Verified", "uni_agent.tasks.swe_bench.reward"),
         ("swe_rebench", "uni_agent.tasks.swe_rebench.reward"),
+        ("swerebench", "uni_agent.tasks.swe_rebench.reward"),
         ("nebius/SWE-rebench", "uni_agent.tasks.swe_rebench.reward"),
     ],
 )
