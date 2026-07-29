@@ -154,6 +154,10 @@ export AKERNEL_TOKEN
 export AKERNEL_TUNNEL_SSL_VERIFY
 export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"
 export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}"
+if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
+    export ASCEND_RT_VISIBLE_DEVICES
+fi
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/verl:${PYTHONPATH:-}"
@@ -205,6 +209,8 @@ env_vars = {
         "CLAUDE_CODE_PROXY_PORT",
         "CONDA_ENV",
         "GATEWAY_COUNT",
+        "ASCEND_RT_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES",
 	"VERL_LOGGING_LEVEL",
         "RAY_DEDUP_LOGS",
         "PYTHONUNBUFFERED",
@@ -230,14 +236,19 @@ if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
 else
     TOTAL_GPUS=$(( NNODES * N_GPUS_PER_NODE ))
 fi
-if ! timeout "${RAY_STATUS_TIMEOUT}" ray status &>/dev/null; then
-    echo "Starting Ray cluster (${TOTAL_GPUS} GPUs)..."
-    ray start --head \
-    --num-gpus="${PHYSICAL_GPUS_PER_NODE}" \
-    --resources="{\"NPU\":${PHYSICAL_GPUS_PER_NODE}}" \
-    --disable-usage-stats
-else
+RAY_STATUS_OUTPUT=""
+if RAY_STATUS_OUTPUT="$(timeout "${RAY_STATUS_TIMEOUT}" ray status 2>/dev/null)"; then
+    if grep -Eq '(^|[[:space:]])GPU($|[[:space:]])' <<<"${RAY_STATUS_OUTPUT}"; then
+        echo "Existing Ray cluster exposes GPU resources, which breaks Ascend NPU accelerator-id mapping." >&2
+        echo "Run 'ray stop -f' once, then rerun this script so Ray starts with NPU resources only." >&2
+        exit 1
+    fi
     echo "Ray cluster already running."
+else
+    echo "Starting Ray cluster (${PHYSICAL_GPUS_PER_NODE} NPU resources; workload=${TOTAL_GPUS})..."
+    ray start --head \
+        --resources="{\"NPU\":${PHYSICAL_GPUS_PER_NODE}}" \
+        --disable-usage-stats
 fi
 
 # ── Launch ────────────────────────────────────────────────────────────────
