@@ -77,12 +77,12 @@ UPDATE_WEIGHTS_BUCKET_MB="${UPDATE_WEIGHTS_BUCKET_MB:-2048}"
 
 # ── Megatron training parallelism ────────────────────────────────────────
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
-    TRAIN_TP="${TRAIN_TP:-${TP:-4}}"
+    TRAIN_TP="${TRAIN_TP:-2}"
 else
-    TRAIN_TP="${TRAIN_TP:-${TP:-4}}"
+    TRAIN_TP="${TRAIN_TP:-2}"
 fi
 TRAIN_PP="${TRAIN_PP:-1}"
-TRAIN_CP="${TRAIN_CP:-1}"
+TRAIN_CP="${TRAIN_CP:-4}"
 OFFLOAD="${OFFLOAD:-True}"
 OPTIMIZER_OFFLOAD_FRACTION="${OFFLOAD_FRACTION:-1.0}"
 USE_MBRIDGE="${USE_MBRIDGE:-True}"
@@ -164,7 +164,7 @@ echo "=== Claude Code Blackbox Megatron Async Training ==="
 echo "Model:       ${MODEL_PATH}"
 echo "Train data:  ${TRAIN_DATA}"
 echo "Val data:    ${VAL_DATA}"
-echo "Engine:      ${ENGINE} (gen_tp=${GEN_TP}, train_tp=${TRAIN_TP})"
+echo "Engine:      ${ENGINE} (gen_tp=${GEN_TP}, train_tp=${TRAIN_TP}, train_cp=${TRAIN_CP})"
 echo "Runner:      ${RUNNER}"
 echo "Tool image:  ${CLAUDE_CODE_TOOL_IMAGE}"
 echo "Proxy port:  ${CLAUDE_CODE_PROXY_PORT}"
@@ -267,7 +267,7 @@ MAIN_CMD=(
     transfer_queue.enable=True \
     transfer_queue.metrics.enabled=True \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.use_remove_padding=False \
     data.train_files="['${TRAIN_DATA}']" \
     data.val_files="['${VAL_DATA}']" \
     data.train_max_samples=${TRAIN_MAX_SAMPLES} \
@@ -315,9 +315,10 @@ MAIN_CMD=(
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
     actor_rollout_ref.actor.megatron.context_parallel_size=${TRAIN_CP} \
     actor_rollout_ref.actor.megatron.use_mbridge=${USE_MBRIDGE} \
-    actor_rollout_ref.actor.megatron.use_remove_padding=True \
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
-    actor_rollout_ref.actor.checkpoint.strict=False \
+    actor_rollout_ref.actor.megatron.use_remove_padding=False \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=True \
+    actor_rollout_ref.actor.use_dynamic_bsz=False \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.megatron.param_offload=${OFFLOAD} \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TRAIN_TP} \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
