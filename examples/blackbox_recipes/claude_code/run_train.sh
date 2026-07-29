@@ -68,7 +68,7 @@ if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
 else
     GEN_TP="${GEN_TP:-${TP:-4}}"
 fi
-N="${N:-2}"
+N="${N:-1}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 TOP_P="${TOP_P:-1.0}"
 TOP_K="${TOP_K:--1}"
@@ -86,7 +86,7 @@ TRAIN_CP="${TRAIN_CP:-4}"
 OFFLOAD="${OFFLOAD:-True}"
 OPTIMIZER_OFFLOAD_FRACTION="${OFFLOAD_FRACTION:-1.0}"
 USE_MBRIDGE="${USE_MBRIDGE:-True}"
-PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-2}"
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-1}"
 
 # ── Agent parameters ─────────────────────────────────────────────────────
 # AGENT_MAX_TURNS is the agent's turn budget inside the sandbox: it becomes
@@ -95,7 +95,7 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-2}"
 # trainer's multi_turn.max_assistant_turns is NOT enforced on the blackbox
 # rollout path (AgentFrameworkRolloutAdapter), so it is not exposed here.
 RUNNER="${RUNNER:-claude_code}"
-AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-40}"
+AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-20}"
 MAX_TURNS="${MAX_TURNS:-${AGENT_MAX_TURNS}}"
 if [[ "${RUNNER}" == "claude_code" ]]; then
     AGENT_RUNNER_FQN="examples.blackbox_recipes.claude_code.claude_code_runner.claude_code_runner"
@@ -134,11 +134,11 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-claude_code_$(date +%Y%m%d_%H%M)}"
 SAVE_FREQ="${SAVE_FREQ:-10}"
 TEST_FREQ="${TEST_FREQ:-10}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
-TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-1}"
 VAL_BEFORE_TRAIN="false"
 CKPTS_DIR="${CKPTS_DIR:-checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}}"
-TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-${MAX_SAMPLES:--1}}"
-VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:-${MAX_SAMPLES:-2}}"
+TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-${MAX_SAMPLES:-1}}"
+VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:-${MAX_SAMPLES:-1}}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-${PPO_MINI_BATCH_SIZE}}"
 VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}"
 
