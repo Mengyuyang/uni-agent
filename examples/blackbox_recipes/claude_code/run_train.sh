@@ -155,9 +155,7 @@ export AKERNEL_TUNNEL_SSL_VERIFY
 export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"
 export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}"
-if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
-    export ASCEND_RT_VISIBLE_DEVICES
-fi
+export ASCEND_RT_VISIBLE_DEVICES="${CLAUDE_CODE_ASCEND_RT_VISIBLE_DEVICES:-$(seq -s, 0 $((PHYSICAL_GPUS_PER_NODE - 1)))}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/verl:${PYTHONPATH:-}"
@@ -170,6 +168,7 @@ echo "Engine:      ${ENGINE} (gen_tp=${GEN_TP}, train_tp=${TRAIN_TP})"
 echo "Runner:      ${RUNNER}"
 echo "Tool image:  ${CLAUDE_CODE_TOOL_IMAGE}"
 echo "Proxy port:  ${CLAUDE_CODE_PROXY_PORT}"
+echo "Visible NPU: ${ASCEND_RT_VISIBLE_DEVICES}"
 echo "Turns:       agent_max_turns=${AGENT_MAX_TURNS}"
 echo "Batch:       n=${N}, mini_bsz=${PPO_MINI_BATCH_SIZE}"
 echo "Sequence:    prompt=${PROMPT_LENGTH}, response=${RESPONSE_LENGTH}"
