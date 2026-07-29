@@ -267,6 +267,7 @@ MAIN_CMD=(
     transfer_queue.enable=True \
     transfer_queue.metrics.enabled=True \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.use_remove_padding=False \
     data.train_files="['${TRAIN_DATA}']" \
     data.val_files="['${VAL_DATA}']" \
     data.train_max_samples=${TRAIN_MAX_SAMPLES} \
