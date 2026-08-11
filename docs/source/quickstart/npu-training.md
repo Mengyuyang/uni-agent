@@ -1,8 +1,11 @@
 # Run Training on NPU
 
-Uni-Agent runs the same Agent workflow on Ascend NPUs. The recipe uses VeOmni as the training engine for better NPU support.
+Uni-Agent runs the same Agent workflow on Ascend NPUs. The distributed Qwen3-Coder
+recipe uses VeOmni, while the single-node dense Qwen3.5 recipe below uses Megatron V1
+with separate trainer and rollout pools.
 
-This guide trains `Qwen3-Coder-30B-A3B-Instruct` with the white-box `ReAct Agent`.
+The distributed recipe below trains `Qwen3-Coder-30B-A3B-Instruct` with the
+white-box `ReAct Agent`.
 
 ## Prerequisites
 
@@ -68,3 +71,42 @@ Checkpoints and per-session Agent logs are written under:
 ## Results
 
 _To be added._
+
+## Claude Code + OpenYuanrong on One A3 Node
+
+This recipe is the training counterpart of the OpenYuanrong Claude Code inference
+smoke test. It uses the canonical Task path end to end:
+
+```text
+verl.trainer.main_ppo
+  -> V1 separate_async (trainer 8 NPUs + rollout 8 NPUs)
+  -> AgentFrameworkRolloutAdapter
+  -> task_runner.run_task
+  -> SWE-reBench/SWE-Bench Task
+  -> Claude Code in OpenYuanrong
+  -> Task reward -> TransferQueue -> PPO update
+```
+
+The defaults match the A3 environment used by the existing Claude Code recipe:
+
+- model: `/mnt/share/weights/Qwen3.5-9B`
+- training data: `/mnt/share/z00876269/datasets/uni-agent_old/swe_rebench_filtered_yuanrong.parquet`
+- validation data: `/mnt/share/z00876269/datasets/uni-agent_old/swe_bench_verified_yuanrong.parquet`
+- external verl source: `/mnt/share/z00876269/code/verl`
+
+Legacy `env` / `reward` rows are normalized to Task Configs inside `run_task`, so
+these parquet files do not need to be regenerated. The launcher accepts exported
+`OPENYUANRONG_*` or legacy `AKERNEL_*` credentials from the current shell and does
+not store them in the Task YAML.
+
+Run from the repository checkout:
+
+```bash
+bash examples/quickstart/training/train_npu_qwen3p5_claude_code_openyuanrong.sh
+```
+
+The script restarts the local Ray cluster and registers exactly 16 `NPU` resources,
+so launch it only when the A3 node is available exclusively for this training job.
+It streams the Ray job until completion. Checkpoints are written under
+`checkpoints/claude_code_task_a3/`; the console and per-session Agent logs are
+written under `/mnt/share/z00876269/logs/claude_code_task_a3/`.

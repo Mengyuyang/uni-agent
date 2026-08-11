@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from uni_agent.sandbox import SandboxConfig, bind_gateway_endpoint
-from uni_agent.tasks import TaskConfigResolver, TaskResult, get_task
+from uni_agent.tasks import TaskConfigResolver, TaskResult, get_task, normalize_task_tools_kwargs
 
 if TYPE_CHECKING:
     from uni_agent.gateway.session import SessionHandle
@@ -30,8 +30,9 @@ async def run_task(
     """Resolve the sample's task, run it against ``session``, and return its result.
 
     Satisfies the framework's ``AgentRunner`` contract (``session`` / ``raw_prompt``
-    / ``sample_index`` / ``tools_kwargs``). ``raw_prompt`` is accepted for protocol
-    parity but unused: a uni_agent task carries its own prompt on the task config.
+    / ``sample_index`` / ``tools_kwargs``). Current rows carry a complete Task Config;
+    legacy Claude Code recipe rows are normalized from ``env`` / ``reward`` plus
+    ``raw_prompt`` at this boundary.
 
     Run-level defaults come from the per-task-name YAML file selected by
     ``task_config_path``. ``TaskConfigResolver`` applies that Task Config, the
@@ -39,7 +40,15 @@ async def run_task(
     the task's reward + info are POSTed back to the session's reward-info endpoint;
     the standalone evaluator reads the returned :class:`TaskResult` directly.
     """
-    sample_config = tools_kwargs.get("task") if tools_kwargs else None
+    if not isinstance(tools_kwargs, dict):
+        raise ValueError("run_task requires tools_kwargs")
+    normalized_tools_kwargs = normalize_task_tools_kwargs(
+        {
+            "prompt": raw_prompt,
+            "extra_info": {"tools_kwargs": tools_kwargs},
+        }
+    )
+    sample_config = normalized_tools_kwargs.get("task")
     if not isinstance(sample_config, dict):
         raise ValueError("run_task requires tools_kwargs['task'] (the serialized Task Config)")
 
