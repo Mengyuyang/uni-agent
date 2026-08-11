@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run this script from a Linux Ray head node. It keeps OpenYuanrong credentials
-# out of the tracked Runtime Environment YAML and forwards them to Ray workers.
+# Run this script from a Linux A3 node. It keeps OpenYuanrong credentials out of
+# the tracked Runtime Environment YAML and forwards them to Ray workers.
 
-REPO_ROOT="${REPO_ROOT:-/mnt/share/z00876269/code/uni-agent}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
 VERL_ROOT="${VERL_ROOT:-/mnt/share/z00876269/code/verl}"
 MODEL_PATH="${MODEL_PATH:-/mnt/share/weights/Qwen3.5-9B}"
 cd "${REPO_ROOT}"
@@ -35,8 +36,38 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-${ROLLOUT_GPU_MEM_UTIL:-0.7}}"
 LOG_DIR="${LOG_DIR:-/mnt/share/z00876269/logs/openyuanrong-claude-code-smoke}"
 RESULT_PATH="${RESULT_PATH:-/mnt/share/z00876269/logs/openyuanrong-claude-code-smoke.json}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+RAY_AUTO_START="${RAY_AUTO_START:-1}"
+RAY_NPU_RESOURCES="${RAY_NPU_RESOURCES:-${N_GPUS_PER_NODE}}"
 
 export USE_OPENYUANRONG_SDK="${USE_OPENYUANRONG_SDK:-0}"
+
+ensure_ray() {
+    # Prefer an explicitly configured, healthy cluster. If RAY_ADDRESS is stale,
+    # retry local discovery without it before starting a single-node A3 cluster.
+    if ray status >/dev/null 2>&1; then
+        return
+    fi
+    if (unset RAY_ADDRESS; ray status >/dev/null 2>&1); then
+        unset RAY_ADDRESS
+        return
+    fi
+    if [[ "${RAY_AUTO_START}" != "1" ]]; then
+        echo "No reachable Ray cluster. Start Ray or set RAY_AUTO_START=1." >&2
+        exit 1
+    fi
+    if [[ "${NNODES}" != "1" ]]; then
+        echo "Ray auto-start only supports NNODES=1; start the multi-node cluster first." >&2
+        exit 1
+    fi
+
+    echo "No reachable Ray cluster; starting a local head with NPU=${RAY_NPU_RESOURCES}."
+    unset RAY_ADDRESS
+    ray start --head \
+        --resources="{\"NPU\": ${RAY_NPU_RESOURCES}}" \
+        --disable-usage-stats
+}
+
+ensure_ray
 
 RUNTIME_ENV_JSON="$("${PYTHON_BIN}" -c '
 import json

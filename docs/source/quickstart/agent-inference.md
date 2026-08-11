@@ -148,7 +148,9 @@ bash examples/quickstart/inference/run_infer_claude_code_openyuanrong.sh
 
 Override `TP`, `NNODES`, `N_GPUS_PER_NODE`, `ENGINE`, and `TOOL_PARSER` to
 match the model and cluster. The script waits for the Ray job and writes a JSON
-result by default, making it suitable for the first connectivity smoke test.
+result by default, making it suitable for the first connectivity smoke test. It
+uses the checkout containing the launcher, reuses a reachable Ray cluster, or
+non-destructively starts a local Ray head for `NNODES=1`.
 
 ## External API Mode
 
