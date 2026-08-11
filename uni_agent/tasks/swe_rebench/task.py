@@ -31,6 +31,11 @@ _GIT_CLEAN_HISTORY = " && ".join(
 
 class SWEREBenchTaskConfig(TaskConfig):
     name: str = "swe_rebench"
+    eval_timeout: float = Field(
+        default=300.0,
+        gt=0,
+        description="Wallclock timeout in seconds for the post-agent SWE-reBench evaluation.",
+    )
     run_oracle_solution: bool = Field(
         default=False,
         description="Oracle mode: skip the agent and score the dataset's gold patch directly.",
@@ -71,7 +76,7 @@ class SWEREBenchTask(Task):
             try:
                 from .reward import compute_reward
 
-                result = await compute_reward(sample, sandbox)
+                result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
             except Exception:
                 logger.exception(f"scoring failed for instance_id={instance_id}")
                 raise

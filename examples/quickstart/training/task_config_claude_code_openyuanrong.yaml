@@ -1,0 +1,45 @@
+- name: swe_bench
+  eval_timeout: 600
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 8400
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/claude-code
+          image_url: 7.227.53.47:8091/openyuanrong/claude-code-tool:latest
+  agent:
+    name: claude_code
+    executable: /opt/claude-code/bin/claude
+    workdir: /testbed
+    auto_install: false
+    max_turns: 40
+    run_timeout: 7200
+    verbose: true
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 75536
+
+- name: swe_rebench
+  eval_timeout: 600
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 8400
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/claude-code
+          image_url: 7.227.53.47:8091/openyuanrong/claude-code-tool:latest
+  agent:
+    name: claude_code
+    executable: /opt/claude-code/bin/claude
+    workdir: /testbed
+    auto_install: false
+    max_turns: 40
+    run_timeout: 7200
+    verbose: true
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 75536
