@@ -25,6 +25,7 @@ GATEWAY_COUNT="${GATEWAY_COUNT:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
 N="${N:-1}"
 LIMIT="${LIMIT:-1}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-${ROLLOUT_GPU_MEM_UTIL:-0.7}}"
 LOG_DIR="${LOG_DIR:-/mnt/shared/uni_agent_logs/openyuanrong-claude-code-smoke}"
 RESULT_PATH="${RESULT_PATH:-/mnt/shared/results/openyuanrong-claude-code-smoke.json}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -46,8 +47,6 @@ env_vars = {key: os.environ[key] for key in keys}
 env_vars.update(
     {
         "PYTHONPATH": "verl",
-        "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
-        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "VLLM_DISABLE_COMPILE_CACHE": "1",
     }
 )
@@ -64,6 +63,7 @@ ray job submit \
     --engine "${ENGINE}" \
     --tool-parser "${TOOL_PARSER}" \
     --tensor-parallel-size "${TP}" \
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
     --nnodes "${NNODES}" \
     --n-gpus-per-node "${N_GPUS_PER_NODE}" \
     --gateway-count "${GATEWAY_COUNT}" \
