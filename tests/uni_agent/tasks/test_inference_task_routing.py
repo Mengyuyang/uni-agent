@@ -124,6 +124,18 @@ def test_openyuanrong_claude_code_example_is_a_valid_task_config():
     assert task.config.agent.auto_install is False
 
 
+def test_openyuanrong_launcher_uses_its_checkout_and_non_destructive_ray_start():
+    repo_root = Path(__file__).parents[3]
+    launcher = (repo_root / "examples/quickstart/inference/run_infer_claude_code_openyuanrong.sh").read_text()
+
+    assert 'SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"' in launcher
+    assert 'REPO_ROOT="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"' in launcher
+    assert "ensure_ray" in launcher
+    assert "ray start --head" in launcher
+    assert "ray stop" not in launcher
+    assert "rm -rf /tmp/ray" not in launcher
+
+
 def test_normalize_task_tools_kwargs_preserves_task_shaped_rows():
     sample = {
         "extra_info": {
