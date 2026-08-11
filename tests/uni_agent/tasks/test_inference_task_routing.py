@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from uni_agent.tasks import TaskConfigResolver, get_task
+from uni_agent.tasks import TaskConfigResolver, get_task, normalize_task_tools_kwargs
 
 
 def test_resolver_loads_every_named_entry(tmp_path):
@@ -115,10 +115,54 @@ def test_openyuanrong_claude_code_example_is_a_valid_task_config():
     assert task.config.sandbox.sandbox_kwargs["mounts"] == [
         {
             "target": "/opt/claude-code",
-            "image_url": "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest",
+            "image_url": "7.227.53.47:8091/openyuanrong/claude-code-tool:latest",
         }
     ]
     assert task.config.agent.name == "claude_code"
     assert task.config.agent.executable == "/opt/claude-code/bin/claude"
     assert task.config.agent.workdir == "/testbed"
     assert task.config.agent.auto_install is False
+
+
+def test_normalize_task_tools_kwargs_preserves_task_shaped_rows():
+    sample = {
+        "extra_info": {
+            "tools_kwargs": {
+                "task": {"name": "swe_bench", "sandbox": {"image": "task-image"}},
+            }
+        }
+    }
+
+    assert normalize_task_tools_kwargs(sample) == sample["extra_info"]["tools_kwargs"]
+
+
+def test_normalize_task_tools_kwargs_converts_legacy_recipe_rows():
+    prompt = [{"role": "user", "content": "fix the bug"}]
+    sample = {
+        "prompt": prompt,
+        "extra_info": {
+            "tools_kwargs": {
+                "env": {"deployment": {"image": "legacy-image"}},
+                "reward": {
+                    "name": "swe_bench",
+                    "metadata": {"ground_truth": {"instance_id": "example"}},
+                },
+            }
+        },
+    }
+
+    tools_kwargs = normalize_task_tools_kwargs(sample)
+
+    assert tools_kwargs["task"] == {
+        "name": "swe_bench",
+        "sandbox": {"image": "legacy-image"},
+        "prompt": prompt,
+        "metadata": {"instance_id": "example"},
+    }
+
+
+def test_normalize_task_tools_kwargs_rejects_malformed_explicit_task():
+    sample = {"extra_info": {"tools_kwargs": {"task": "not-a-mapping", "env": {}, "reward": {}}}}
+
+    with pytest.raises(TypeError, match="tools_kwargs.task must be a mapping"):
+        normalize_task_tools_kwargs(sample)

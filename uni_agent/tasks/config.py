@@ -25,6 +25,69 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
     return result
 
 
+def normalize_task_tools_kwargs(sample: Mapping[str, Any]) -> dict[str, Any]:
+    """Return task-shaped ``tools_kwargs`` for current or legacy SWE rows.
+
+    Current rows already carry ``tools_kwargs.task``.  The Claude Code recipe's
+    older parquet format instead carries ``tools_kwargs.env`` and
+    ``tools_kwargs.reward``; convert only that complete legacy shape so the
+    framework runner still receives one canonical Task Config.
+    """
+    extra_info = sample.get("extra_info")
+    if not isinstance(extra_info, Mapping):
+        raise TypeError("sample.extra_info must be a mapping")
+
+    raw_tools_kwargs = extra_info.get("tools_kwargs")
+    if not isinstance(raw_tools_kwargs, Mapping):
+        raise TypeError("sample.extra_info.tools_kwargs must be a mapping")
+    tools_kwargs = dict(raw_tools_kwargs)
+
+    if "task" in tools_kwargs:
+        task = tools_kwargs["task"]
+        if not isinstance(task, Mapping):
+            raise TypeError("sample.extra_info.tools_kwargs.task must be a mapping")
+        tools_kwargs["task"] = dict(task)
+        return tools_kwargs
+
+    env_config = tools_kwargs.get("env")
+    reward_config = tools_kwargs.get("reward")
+    if not isinstance(env_config, Mapping) or not isinstance(reward_config, Mapping):
+        raise ValueError("sample.extra_info.tools_kwargs requires either task or legacy env and reward mappings")
+
+    image = env_config.get("image")
+    if not image:
+        deployment = env_config.get("deployment")
+        if isinstance(deployment, Mapping):
+            image = deployment.get("image")
+    if not isinstance(image, str) or not image:
+        raise ValueError("legacy sample.extra_info.tools_kwargs.env requires an image")
+
+    task_name = reward_config.get("name")
+    if not isinstance(task_name, str) or not task_name:
+        raise ValueError("legacy sample.extra_info.tools_kwargs.reward requires a name")
+
+    metadata = reward_config.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise TypeError("legacy sample.extra_info.tools_kwargs.reward.metadata must be a mapping")
+    ground_truth = metadata.get("ground_truth")
+    if ground_truth is not None:
+        if not isinstance(ground_truth, Mapping):
+            raise TypeError("legacy sample.extra_info.tools_kwargs.reward.metadata.ground_truth must be a mapping")
+        metadata = ground_truth
+
+    prompt = sample.get("prompt")
+    if prompt is None:
+        raise ValueError("legacy sample requires prompt")
+
+    tools_kwargs["task"] = {
+        "name": task_name,
+        "sandbox": {"image": image},
+        "prompt": prompt,
+        "metadata": dict(metadata),
+    }
+    return tools_kwargs
+
+
 @functools.lru_cache(maxsize=8)
 def _load_task_config_file(path: str) -> dict[str, dict[str, Any]]:
     """Load a Task Config YAML file into a ``{name: config}`` index."""

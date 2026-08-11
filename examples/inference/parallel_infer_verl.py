@@ -49,7 +49,7 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
-from uni_agent.tasks import TaskConfigResolver
+from uni_agent.tasks import TaskConfigResolver, normalize_task_tools_kwargs
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
 
@@ -162,7 +162,7 @@ def _build_prompts(samples: list, uids: list):
         tensor_dict={
             "raw_prompt": [sample.get("prompt") for sample in samples],
             "uid": list(uids),
-            "tools_kwargs": [sample["extra_info"]["tools_kwargs"] for sample in samples],
+            "tools_kwargs": [normalize_task_tools_kwargs(sample) for sample in samples],
         },
         non_tensor_dict={"global_steps": None, "validate": True},
     )
