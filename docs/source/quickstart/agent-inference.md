@@ -24,6 +24,10 @@ The command writes `~/data/swe_agent/swe_bench_verified.parquet`.
 
 Each row contains the prompt and a provider-agnostic task definition under `extra_info.tools_kwargs.task`. The selected sandbox backend maps the task image at runtime.
 
+For verl inference, legacy Claude Code recipe rows containing
+`extra_info.tools_kwargs.env` and `reward` are normalized to the same Task
+Config in memory. An explicitly present but malformed `task` is still rejected.
+
 ## Task Configuration
 
 For each dataset sample, Uni-Agent resolves the final Task Config in this order:

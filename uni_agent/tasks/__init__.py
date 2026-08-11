@@ -18,7 +18,7 @@ themselves, and are built with :func:`get_task` -- from either a config instance
 from __future__ import annotations
 
 from .base import Task, TaskConfig, TaskResult
-from .config import TaskConfigResolver
+from .config import TaskConfigResolver, normalize_task_tools_kwargs
 from .registry import get_task
 
 __all__ = [
@@ -27,4 +27,5 @@ __all__ = [
     "TaskConfigResolver",
     "TaskResult",
     "get_task",
+    "normalize_task_tools_kwargs",
 ]
