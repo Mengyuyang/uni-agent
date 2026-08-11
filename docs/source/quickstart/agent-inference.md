@@ -150,7 +150,8 @@ Override `TP`, `NNODES`, `N_GPUS_PER_NODE`, `ENGINE`, and `TOOL_PARSER` to
 match the model and cluster. The script waits for the Ray job and writes a JSON
 result by default, making it suitable for the first connectivity smoke test. It
 uses the checkout containing the launcher, reuses a reachable Ray cluster, or
-non-destructively starts a local Ray head for `NNODES=1`.
+non-destructively starts a local Ray head for `NNODES=1`. The example Task Config
+keeps the Claude Code recipe's 600-second SWE-Bench evaluation timeout.
 
 ## External API Mode
 

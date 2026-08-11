@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 class SWEBenchTaskConfig(TaskConfig):
     name: str = "swe_bench"
+    eval_timeout: float = Field(
+        default=300.0,
+        gt=0,
+        description="Wallclock timeout in seconds for the post-agent SWE-bench evaluation.",
+    )
     run_gold_patch: bool = Field(
         default=False,
         description="Oracle mode: skip the agent and score the dataset's gold patch directly.",
@@ -51,7 +56,7 @@ class SWEBenchTask(Task):
 
             from .reward import compute_reward
 
-            result = await compute_reward(sample, sandbox)
+            result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
 
             logger.info(f"task done: resolved={result['resolved']}")
             return TaskResult(
