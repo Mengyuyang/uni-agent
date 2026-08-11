@@ -1,5 +1,10 @@
+import asyncio
+from copy import deepcopy
+from types import SimpleNamespace
+
 import pytest
 
+import uni_agent.framework.task_runner as task_runner
 from uni_agent.framework.task_runner import _reward_info_from_result
 from uni_agent.tasks import TaskResult
 
@@ -37,3 +42,51 @@ def test_reward_info_rejects_non_boolean_agent_completion():
 
     with pytest.raises(ValueError, match="finished must be a bool or None"):
         _reward_info_from_result(result)
+
+
+def test_run_task_binds_openyuanrong_gateway_before_task_start(monkeypatch):
+    sample_task = {
+        "name": "swe_bench",
+        "sandbox": {
+            "provider": "openyuanrong",
+            "image": "swebench/example:latest",
+            "sandbox_kwargs": {
+                "proxy_port": 39001,
+                "upstream": "stale.example:1234",
+            },
+        },
+        "metadata": {"instance_id": "example"},
+    }
+    original_task = deepcopy(sample_task)
+    captured: dict = {}
+
+    class _FakeTask:
+        async def run(self):
+            return TaskResult(reward=1.0, finished=True)
+
+    def _capture_task(config):
+        captured.update(config)
+        return _FakeTask()
+
+    monkeypatch.setattr(task_runner, "get_task", _capture_task)
+    session = SimpleNamespace(
+        base_url="http://10.0.0.8:42317/sessions/session-1/v1",
+        reward_info_url=None,
+    )
+
+    result = asyncio.run(
+        task_runner.run_task(
+            session=session,
+            tools_kwargs={"task": sample_task},
+            model_name="policy",
+        )
+    )
+
+    assert result.reward == 1.0
+    assert sample_task == original_task
+    assert captured["sandbox"]["sandbox_kwargs"] == {
+        "proxy_port": 39001,
+        "upstream": "10.0.0.8:42317",
+    }
+    assert captured["agent"]["model"]["base_url"] == ("http://127.0.0.1:39001/sessions/session-1/v1")
+    assert captured["agent"]["model"]["model_name"] == "policy"

@@ -34,7 +34,7 @@ class _FakeSandbox:
 
     async def exec_shell(self, script: str, *, timeout=None, workdir=None, env=None) -> ExecResult:
         self.calls.append({"script": script, "timeout": timeout})
-        if script.startswith("command -v claude"):
+        if script.startswith("command -v claude") or script.startswith("test -x "):
             return ExecResult(exit_code=self.probe_results.pop(0), stdout="", stderr="")
         if script.startswith("command -v npm"):
             return ExecResult(exit_code=0 if self.npm_available else 1, stdout="", stderr="")
@@ -150,6 +150,48 @@ def test_run_uses_sandbox_default_workdir():
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_FORK_SUBAGENT"] == "0"
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] == "1"
+
+
+def test_run_uses_mounted_executable_and_workdir_without_installing():
+    config = ClaudeCodeConfig(
+        executable="/opt/claude-code/bin/claude",
+        workdir="/testbed",
+        auto_install=False,
+        model=ModelConfig(
+            base_url="http://127.0.0.1:38197/sessions/session-1/v1",
+            model_name="policy",
+        ),
+    )
+    sandbox = _FakeSandbox(probe_results=[0])
+
+    result = asyncio.run(
+        ClaudeCodeAgent(config).run(
+            sandbox=sandbox,
+            messages=[{"role": "user", "content": "fix the bug"}],
+        )
+    )
+
+    assert result.finished is True
+    assert sandbox.calls[0]["script"] == "test -x /opt/claude-code/bin/claude"
+    assert all(
+        call["script"] not in {_CLAUDE_NPM_INSTALL_COMMAND, _CLAUDE_NATIVE_INSTALL_COMMAND} for call in sandbox.calls
+    )
+    assert sandbox.exec_calls[0]["argv"][0] == "/opt/claude-code/bin/claude"
+    assert sandbox.exec_calls[0]["workdir"] == "/testbed"
+    assert sandbox.exec_calls[0]["env"]["ANTHROPIC_BASE_URL"] == ("http://127.0.0.1:38197/sessions/session-1")
+
+
+def test_missing_mounted_executable_fails_without_auto_install():
+    config = ClaudeCodeConfig(
+        executable="/opt/claude-code/bin/claude",
+        auto_install=False,
+    )
+    sandbox = _FakeSandbox(probe_results=[1])
+
+    with pytest.raises(RuntimeError, match="auto_install is disabled"):
+        asyncio.run(ClaudeCodeAgent(config)._ensure_claude(sandbox))
+
+    assert [call["script"] for call in sandbox.calls] == ["test -x /opt/claude-code/bin/claude"]
 
 
 def test_run_reports_nonzero_process_exit():

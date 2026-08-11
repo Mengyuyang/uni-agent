@@ -12,7 +12,7 @@ from .base import ExecResult, Sandbox, SandboxBackend, SandboxConfig
 # Host-local provider is stdlib-only: import (and register) it eagerly. Heavier
 # providers (e.g. ``modal``) stay lazy via the registry's module map.
 from .local import LocalSandbox
-from .registry import build_sandbox
+from .registry import bind_gateway_endpoint, build_sandbox
 
 __all__ = [
     "ExecResult",
@@ -20,5 +20,6 @@ __all__ = [
     "SandboxBackend",
     "SandboxConfig",
     "LocalSandbox",
+    "bind_gateway_endpoint",
     "build_sandbox",
 ]

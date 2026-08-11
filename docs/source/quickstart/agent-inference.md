@@ -88,6 +88,64 @@ Configure the sandbox provider and Agent limits in YAML. Do not hard-code the ru
 !!! note "Claude Code network access"
     Claude Code runs inside the sandbox and calls the Anthropic Messages endpoint from there. The endpoint must therefore be resolvable and reachable **from inside the sandbox**.
 
+### OpenYuanrong with Claude Code
+
+The verl rollout path can run the same Task/Agent stack on OpenYuanrong with:
+
+`examples/quickstart/inference/task_config_claude_code_openyuanrong.yaml`
+
+The example reuses the Claude Code sidecar from the black-box recipe. It mounts
+the image at `/opt/claude-code`, runs `/opt/claude-code/bin/claude` in
+`/testbed`, and disables per-sandbox installation. Change `image_url` in the
+Task Config if your OpenYuanrong service uses another registry or a pinned tag.
+
+Every Gateway session uses a dynamically allocated Ray-node port. The Task
+runner therefore binds the endpoint immediately before sandbox creation:
+
+```text
+Gateway: http://<ray-node>:<dynamic-port>/sessions/<id>/v1
+    -> OpenYuanrong upstream=<ray-node>:<dynamic-port>, proxy_port=38197
+    -> Agent: http://127.0.0.1:38197/sessions/<id>/v1
+```
+
+Do not put a static `upstream` in the Task Config. `proxy_port` is
+sandbox-local and can remain fixed because every task gets an isolated sandbox.
+
+On every Ray node that may execute the Task runner, install `swebench` and the
+OpenYuanrong packages documented by this repository:
+
+```bash
+pip install swebench akernel_sdk openyuanrong_sdk
+```
+
+At runtime, `uni_agent.sandbox.openyuanrong` selects one of these import paths:
+
+- default (`USE_OPENYUANRONG_SDK=0`): import `akernel_sdk`
+- `USE_OPENYUANRONG_SDK=1`: import `openyuanrong_sandbox_sdk`
+
+The OpenYuanrong service must also be able to pull both images used by a task:
+the per-instance `swebench/sweb.eval.x86_64.*` image from the parquet row and
+the configured Claude Code sidecar image.
+
+Start with one sample and one concurrent session. The helper forwards
+OpenYuanrong credentials through Ray's Runtime Environment without storing
+them in a tracked YAML file:
+
+```bash
+export OPENYUANRONG_SERVER_ADDRESS="<server-address>"
+export OPENYUANRONG_TOKEN="<token>"
+export MODEL_PATH="Qwen/Qwen3.6-35B-A3B"
+
+LIMIT=1 \
+CONCURRENCY=1 \
+GATEWAY_COUNT=1 \
+bash examples/quickstart/inference/run_infer_claude_code_openyuanrong.sh
+```
+
+Override `TP`, `NNODES`, `N_GPUS_PER_NODE`, `ENGINE`, and `TOOL_PARSER` to
+match the model and cluster. The script waits for the Ray job and writes a JSON
+result by default, making it suitable for the first connectivity smoke test.
+
 ## External API Mode
 
 The endpoint must support the protocol used by the selected Agent:

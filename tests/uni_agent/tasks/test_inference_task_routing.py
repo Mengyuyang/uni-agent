@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from uni_agent.tasks import TaskConfigResolver
+from uni_agent.tasks import TaskConfigResolver, get_task
 
 
 def test_resolver_loads_every_named_entry(tmp_path):
@@ -87,3 +89,36 @@ def test_resolver_rejects_missing_route():
     resolver = TaskConfigResolver({"other": {"name": "other"}})
     with pytest.raises(ValueError, match="no Task Config for sample task 'missing'"):
         resolver.resolve({"name": "missing"})
+
+
+def test_openyuanrong_claude_code_example_is_a_valid_task_config():
+    repo_root = Path(__file__).parents[3]
+    config_path = repo_root / "examples/quickstart/inference/task_config_claude_code_openyuanrong.yaml"
+    resolver = TaskConfigResolver.from_file(str(config_path))
+    resolved = resolver.resolve(
+        {
+            "name": "swe_bench",
+            "sandbox": {"image": "swebench/example:latest"},
+            "prompt": [{"role": "user", "content": "fix the bug"}],
+            "metadata": {"instance_id": "example"},
+        },
+        runtime_model={
+            "base_url": "http://gateway.example:8000/sessions/1/v1",
+            "model_name": "policy",
+        },
+    )
+
+    task = get_task(resolved)
+
+    assert task.config.sandbox.provider == "openyuanrong"
+    assert task.config.sandbox.sandbox_kwargs["proxy_port"] == 38197
+    assert task.config.sandbox.sandbox_kwargs["mounts"] == [
+        {
+            "target": "/opt/claude-code",
+            "image_url": "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest",
+        }
+    ]
+    assert task.config.agent.name == "claude_code"
+    assert task.config.agent.executable == "/opt/claude-code/bin/claude"
+    assert task.config.agent.workdir == "/testbed"
+    assert task.config.agent.auto_install is False

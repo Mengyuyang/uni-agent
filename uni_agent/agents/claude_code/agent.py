@@ -11,6 +11,7 @@ No proxy process.
 from __future__ import annotations
 
 import logging
+import shlex
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -74,6 +75,16 @@ class ClaudeCodeConfig(AgentConfig):
     """Black-box launch params for Claude Code (policy endpoint lives on :attr:`AgentConfig.model`)."""
 
     name: str = "claude_code"
+    executable: str = Field(
+        default="claude",
+        min_length=1,
+        description="Claude Code executable name or absolute path inside the sandbox.",
+    )
+    workdir: str | None = Field(default=None, description="Working directory for the Claude Code process.")
+    auto_install: bool = Field(
+        default=True,
+        description="Install Claude Code when executable is unavailable; disable for mounted sidecars.",
+    )
     max_turns: int | None = Field(default=80, description="--max-turns budget; None to omit.")
     disallowed_tools: list[str] = Field(
         default_factory=lambda: ["Agent", "Task", "WebFetch", "WebSearch", "AskUserQuestion"],
@@ -114,7 +125,7 @@ class ClaudeCodeAgent(Agent):
         argv = self._claude_argv(problem, system_prompt)
         env = self._claude_env(endpoint)
         logger.info("claude_code: launch (endpoint=%s)", endpoint)
-        proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout)
+        proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=cfg.workdir)
 
         out_tail = (proc.stdout or "").strip()[-2000:]
         err_tail = (proc.stderr or "").strip()[-2000:]
@@ -135,8 +146,15 @@ class ClaudeCodeAgent(Agent):
 
     # ----- helpers -----
     async def _ensure_claude(self, sandbox: Sandbox) -> None:
-        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code == 0:
+        cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
+        probe_command = self._executable_probe()
+        if (await sandbox.exec_shell(probe_command)).exit_code == 0:
             return
+
+        if not cfg.auto_install:
+            raise RuntimeError(
+                f"claude_code: executable {cfg.executable!r} is unavailable and auto_install is disabled"
+            )
 
         has_npm = (await sandbox.exec_shell("command -v npm >/dev/null 2>&1")).exit_code == 0
         install_method = "npm" if has_npm else "native installer"
@@ -147,9 +165,22 @@ class ClaudeCodeAgent(Agent):
             detail = (result.stderr or result.stdout or "unknown error").strip()[-2000:]
             raise RuntimeError(f"claude_code: failed to install Claude Code with {install_method}: {detail}")
 
-        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code != 0:
-            raise RuntimeError("claude_code: installation finished but claude is not available on PATH")
+        if (await sandbox.exec_shell(probe_command)).exit_code != 0:
+            if "/" in cfg.executable:
+                raise RuntimeError(
+                    f"claude_code: installation finished but executable {cfg.executable!r} is not executable"
+                )
+            raise RuntimeError(
+                f"claude_code: installation finished but executable {cfg.executable!r} is not available on PATH"
+            )
         logger.info("claude_code: installation completed")
+
+    def _executable_probe(self) -> str:
+        cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
+        executable = shlex.quote(cfg.executable)
+        if "/" in cfg.executable:
+            return f"test -x {executable}"
+        return f"command -v {executable} >/dev/null 2>&1"
 
     def _split_messages(self, messages: list[dict[str, Any]]) -> tuple[str | None, str]:
         if len(messages) > 2:
@@ -166,7 +197,7 @@ class ClaudeCodeAgent(Agent):
         if not model:
             raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
         argv = [
-            "claude",
+            cfg.executable,
             "-p",
             problem,
             "--model",

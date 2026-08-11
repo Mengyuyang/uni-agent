@@ -64,3 +64,8 @@ def get_sandbox_cls(name: str) -> type[Sandbox]:
 def build_sandbox(config: SandboxConfig) -> Sandbox:
     """Instantiate the sandbox provider named by ``config.provider`` from its config."""
     return get_sandbox_cls(config.provider).from_config(config)
+
+
+def bind_gateway_endpoint(config: SandboxConfig, base_url: str) -> tuple[SandboxConfig, str]:
+    """Return provider-specific sandbox config and its sandbox-visible Gateway URL."""
+    return get_sandbox_cls(config.provider).bind_gateway_endpoint(config, base_url)
