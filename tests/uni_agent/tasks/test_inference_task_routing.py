@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -122,6 +125,7 @@ def test_openyuanrong_claude_code_example_is_a_valid_task_config():
     assert task.config.agent.executable == "/opt/claude-code/bin/claude"
     assert task.config.agent.workdir == "/testbed"
     assert task.config.agent.auto_install is False
+    assert task.config.eval_timeout == 600
 
 
 def test_openyuanrong_launcher_uses_its_checkout_and_non_destructive_ray_start():
@@ -134,6 +138,51 @@ def test_openyuanrong_launcher_uses_its_checkout_and_non_destructive_ray_start()
     assert "ray start --head" in launcher
     assert "ray stop" not in launcher
     assert "rm -rf /tmp/ray" not in launcher
+
+
+def test_swe_bench_task_forwards_configured_eval_timeout(monkeypatch):
+    from uni_agent.tasks.swe_bench.task import SWEBenchTask, SWEBenchTaskConfig
+
+    class FakeSandbox:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    class FakeAgent:
+        async def run(self, *, sandbox, messages):
+            return SimpleNamespace(finished=True)
+
+    captured = {}
+
+    async def fake_compute_reward(metadata, sandbox, eval_timeout):
+        captured.update(metadata=metadata, sandbox=sandbox, eval_timeout=eval_timeout)
+        return {"resolved": False}
+
+    reward_module = ModuleType("uni_agent.tasks.swe_bench.reward")
+    reward_module.compute_reward = fake_compute_reward
+    monkeypatch.setitem(sys.modules, reward_module.__name__, reward_module)
+
+    metadata = {"instance_id": "example"}
+    task = SWEBenchTask(
+        SWEBenchTaskConfig(
+            sandbox={"provider": "local"},
+            agent={"name": "claude_code"},
+            prompt=[{"role": "user", "content": "fix it"}],
+            metadata=metadata,
+            eval_timeout=600,
+        )
+    )
+    sandbox = FakeSandbox()
+    monkeypatch.setattr(task, "build_sandbox", lambda: sandbox)
+    monkeypatch.setattr(task, "build_agent", FakeAgent)
+
+    result = asyncio.run(task.run())
+
+    assert captured == {"metadata": metadata, "sandbox": sandbox, "eval_timeout": 600}
+    assert result.reward == 0.0
+    assert result.finished is True
 
 
 def test_normalize_task_tools_kwargs_preserves_task_shaped_rows():

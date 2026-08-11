@@ -1,4 +1,5 @@
 - name: swe_bench
+  eval_timeout: 600
   sandbox:
     provider: openyuanrong
     runtime_timeout: 7200
