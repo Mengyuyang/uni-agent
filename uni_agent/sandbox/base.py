@@ -174,6 +174,23 @@ class Sandbox(abc.ABC):
         """
         return cls()
 
+    @classmethod
+    def bind_gateway_endpoint(
+        cls,
+        config: SandboxConfig,
+        base_url: str,
+    ) -> tuple[SandboxConfig, str]:
+        """Bind a Gateway session endpoint for this provider.
+
+        Most providers let the sandbox reach the Gateway URL directly, so the
+        default implementation is a no-op. Providers that create a reverse
+        tunnel may return an updated sandbox config together with the URL that
+        is reachable from inside the sandbox.
+
+        Neither ``config`` nor ``base_url`` is mutated.
+        """
+        return config, base_url
+
     # ----- control plane: lifecycle (owner-facing) -----
     @abc.abstractmethod
     async def start(self) -> None:

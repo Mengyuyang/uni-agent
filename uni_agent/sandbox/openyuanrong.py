@@ -14,6 +14,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 from .base import ExecResult, Sandbox, _to_str
 from .registry import register_sandbox
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _sdk_initialized = False
+DEFAULT_GATEWAY_PROXY_PORT = 38197
 
 
 def _resolve_sandbox_name() -> str | None:
@@ -142,6 +144,61 @@ class OpenyuanrongSandbox(Sandbox):
     @classmethod
     def from_config(cls, config: SandboxConfig) -> OpenyuanrongSandbox:
         return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
+
+    @classmethod
+    def bind_gateway_endpoint(
+        cls,
+        config: SandboxConfig,
+        base_url: str,
+    ) -> tuple[SandboxConfig, str]:
+        """Route a per-session Gateway URL through the sandbox reverse tunnel."""
+        if not base_url:
+            raise ValueError("openyuanrong: Gateway base_url must not be empty")
+
+        parsed = urlsplit(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError(f"openyuanrong: invalid Gateway base_url {base_url!r}")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("openyuanrong: Gateway base_url must not contain user info")
+        try:
+            gateway_port = parsed.port
+        except ValueError as exc:
+            raise ValueError(f"openyuanrong: invalid Gateway port in base_url {base_url!r}") from exc
+        if gateway_port is None:
+            raise ValueError(f"openyuanrong: Gateway base_url must contain an explicit port: {base_url!r}")
+        if not 1 <= gateway_port <= 65535:
+            raise ValueError(f"openyuanrong: Gateway port must be in [1, 65535], got {gateway_port}")
+
+        sandbox_kwargs = dict(config.sandbox_kwargs)
+        raw_proxy_port = sandbox_kwargs.get("proxy_port", DEFAULT_GATEWAY_PROXY_PORT)
+        if isinstance(raw_proxy_port, int) and not isinstance(raw_proxy_port, bool):
+            proxy_port = raw_proxy_port
+        elif isinstance(raw_proxy_port, str) and raw_proxy_port.strip().isdigit():
+            proxy_port = int(raw_proxy_port.strip())
+        else:
+            raise ValueError(f"openyuanrong: proxy_port must be an integer, got {raw_proxy_port!r}")
+        if not 1 <= proxy_port <= 65535:
+            raise ValueError(f"openyuanrong: proxy_port must be in [1, 65535], got {proxy_port}")
+
+        gateway_host = parsed.hostname
+        upstream_host = f"[{gateway_host}]" if ":" in gateway_host else gateway_host
+        sandbox_kwargs.update(
+            {
+                "upstream": f"{upstream_host}:{gateway_port}",
+                "proxy_port": proxy_port,
+            }
+        )
+        bound_config = config.model_copy(update={"sandbox_kwargs": sandbox_kwargs})
+        sandbox_base_url = urlunsplit(
+            (
+                "http",
+                f"127.0.0.1:{proxy_port}",
+                parsed.path,
+                parsed.query,
+                "",
+            )
+        )
+        return bound_config, sandbox_base_url
 
     # ----- public: control plane -----
     async def start(self) -> None:

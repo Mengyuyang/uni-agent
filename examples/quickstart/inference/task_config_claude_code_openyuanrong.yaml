@@ -1,0 +1,23 @@
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      # The Task runner fills `upstream` from the live Gateway session.
+      # Keep this port aligned with the sandbox-visible model URL.
+      proxy_port: 38197
+      mounts:
+        - target: /opt/claude-code
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest
+  agent:
+    name: claude_code
+    executable: /opt/claude-code/bin/claude
+    workdir: /testbed
+    auto_install: false
+    max_turns: 200
+    run_timeout: 4800
+    verbose: true
+    model:
+      temperature: 1.0
+      top_p: 0.95
+      max_total_tokens: 131072

@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from uni_agent.sandbox import SandboxConfig, bind_gateway_endpoint
 from uni_agent.tasks import TaskConfigResolver, TaskResult, get_task
 
 if TYPE_CHECKING:
@@ -51,6 +52,13 @@ async def run_task(
             "model_name": model_name,
         },
     )
+
+    if not session.base_url:
+        raise ValueError("run_task requires session.base_url")
+    sandbox_config = SandboxConfig.model_validate(task.get("sandbox", {}))
+    sandbox_config, sandbox_base_url = bind_gateway_endpoint(sandbox_config, session.base_url)
+    task["sandbox"] = sandbox_config.model_dump()
+    task["agent"]["model"]["base_url"] = sandbox_base_url
 
     task_name = task.get("name")
     logger.info("run_task start: task=%s sample_index=%s", task_name, sample_index)
