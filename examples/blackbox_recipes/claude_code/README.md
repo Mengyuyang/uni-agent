@@ -95,12 +95,22 @@ After pushing, point training at it with `CLAUDE_CODE_TOOL_IMAGE`.
 ## 2. Training (Fully Async)
 
 ```bash
-OPENYUANRONG_SERVER_ADDRESS="6.2.179.37:8888" \
-OPENYUANRONG_TOKEN="<token>" \
-CLAUDE_CODE_TOOL_IMAGE=swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest \
-MODEL_PATH=~/models/Qwen3.5-9B \
 bash examples/blackbox_recipes/claude_code/run_train.sh
 ```
+
+The training script defaults to the supplied Ascend A3 environment:
+
+- recipe repository: `/mnt/share/z00876269/code/uni-agent`
+- verl checkout: `/mnt/share/z00876269/code/verl`
+- model: `/mnt/share/weights/Qwen3.5-9B`
+- train data: `/mnt/share/z00876269/datasets/uni-agent_old/swe_rebench_filtered_yuanrong.parquet`
+- validation data: `/mnt/share/z00876269/datasets/uni-agent_old/swe_bench_verified_yuanrong.parquet`
+- resources: 16 logical NPUs, split 8 for training and 8 for rollout
+
+YuanRong credentials are intentionally not hard-coded. Existing exported
+`OPENYUANRONG_*` values from `.bashrc` are forwarded to the Ray job runtime;
+legacy `AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN` values are accepted as a
+fallback and translated without printing the token.
 
 The training YAML keeps `claude_code` as the only runner:
 

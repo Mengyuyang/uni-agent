@@ -10,17 +10,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-/mnt/share/z00876269/code/uni-agent}"
+VERL_ROOT="${VERL_ROOT:-/mnt/share/z00876269/code/verl}"
 cd "${REPO_ROOT}"
 
 # ── Model & data ─────────────────────────────────────────────────────────
-MODEL_PATH="${MODEL_PATH:-${HOME}/models/Qwen3.5-9B}"
-DATA_PATH="${DATA_PATH:-${HOME}/data/swe_agent/swe_bench_verified.parquet}"
+MODEL_PATH="${MODEL_PATH:-/mnt/share/weights/Qwen3.5-9B}"
+DATA_PATH="${DATA_PATH:-/mnt/share/z00876269/datasets/uni-agent_old/swe_bench_verified_yuanrong.parquet}"
 
 # ── Inference parameters ─────────────────────────────────────────────────
 MAX_SAMPLES="${MAX_SAMPLES:--1}"
 PROMPT_LENGTH="${PROMPT_LENGTH:-4096}"
-RESPONSE_LENGTH="${RESPONSE_LENGTH:-131072}"
+RESPONSE_LENGTH="${RESPONSE_LENGTH:-75536}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 TOP_P="${TOP_P:-1.0}"
 N="${N:-1}"
@@ -32,23 +33,23 @@ GATEWAY_COUNT="${GATEWAY_COUNT:-1}"
 MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-8}"
 
 # ── Agent parameters ─────────────────────────────────────────────────────
-AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-100}"
-CLAUDE_CODE_TOOL_IMAGE="${CLAUDE_CODE_TOOL_IMAGE:-swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest}"
+AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-40}"
+CLAUDE_CODE_TOOL_IMAGE="${CLAUDE_CODE_TOOL_IMAGE:-7.227.53.47:8091/openyuanrong/claude-code-tool:latest}"
 SWE_AGENT_RUN_TIMEOUT="${SWE_AGENT_RUN_TIMEOUT:-7200}"
 
 # ── openYuanrong (remote sandbox) ─────────────────────────────────────────────
-export OPENYUANRONG_SERVER_ADDRESS="${OPENYUANRONG_SERVER_ADDRESS:-}"
-export OPENYUANRONG_TOKEN="${OPENYUANRONG_TOKEN:-}"
+export OPENYUANRONG_SERVER_ADDRESS="${OPENYUANRONG_SERVER_ADDRESS:-${AKERNEL_SERVER_ADDRESS:-}}"
+export OPENYUANRONG_TOKEN="${OPENYUANRONG_TOKEN:-${AKERNEL_TOKEN:-}}"
 export OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
 
 # ── Logging & env ────────────────────────────────────────────────────────
 export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"
-export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.7}"
+export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.5}"
 export AGENT_MAX_TURNS
 export SWE_AGENT_EVAL_TIMEOUT="${SWE_AGENT_EVAL_TIMEOUT:-600}"
 export CLAUDE_CODE_DUMP_DIR="${CLAUDE_CODE_DUMP_DIR:-}"
 export CLAUDE_CODE_DIAGNOSTICS="${CLAUDE_CODE_DIAGNOSTICS:-0}"
-export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/verl:${PYTHONPATH:-}"
+export PYTHONPATH="${VERL_ROOT}:${REPO_ROOT}:${REPO_ROOT}/verl:${PYTHONPATH:-}"
 
 echo "=== Claude Code Blackbox Inference ==="
 echo "Model:       ${MODEL_PATH}"
