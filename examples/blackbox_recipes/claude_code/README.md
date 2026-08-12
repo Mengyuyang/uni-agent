@@ -118,9 +118,29 @@ agent_runner_fqn: examples.blackbox_recipes.claude_code.claude_code_runner.claud
 | `CLAUDE_CODE_TOOL_IMAGE` | `swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest` | Sidecar tool image |
 | `CLAUDE_CODE_PROXY_PORT` | `38197` | Sandbox-local reverse tunnel port shared by OpenYuanrong and `ANTHROPIC_BASE_URL` |
 | `CONDA_ENV` | `testbed` | Conda env activated inside the sandbox before running claude |
+| `CLAUDE_CODE_DUMP_DIR` | unset | Optional worker-visible directory for per-session `prompt.txt`, `response.txt`, `stderr.txt`, `agent.json`, and `reward.json` artifacts |
+| `CLAUDE_CODE_DIAGNOSTICS` | `0` | Log the successful Claude response tail and repository status/diff summary before reward evaluation |
 
 `AGENT_MAX_TURNS` is the only knob that bounds the agent. The trainer's
 `multi_turn.max_assistant_turns` is not enforced on the blackbox rollout path
 (`AgentFrameworkRolloutAdapter`) — claude runs to its own `--max-turns` inside
 the sandbox and the gateway counts the turns afterward — so it is not exposed as
 a separate knob. A value of `1` would cripple the agent, hence the default `100`.
+
+### Dumping the effective prompt and Claude response
+
+Set `CLAUDE_CODE_DUMP_DIR` to a path visible to every Ray worker. On a
+multi-node run, use a shared filesystem path if you want all artifacts collected
+in one place:
+
+```bash
+CLAUDE_CODE_DUMP_DIR=/mnt/share/claude-code-dumps \
+CLAUDE_CODE_DIAGNOSTICS=1 \
+bash examples/blackbox_recipes/claude_code/run_train.sh
+```
+
+Each rollout writes to `sample-<index>-<session-id>-<hash>/`. `prompt.txt` is the exact
+task passed to `claude -p`, `response.txt` is the Claude CLI stdout, and
+`reward.json` contains the evaluator result. Dump failures are logged but do not
+interrupt reward evaluation. Leave `CLAUDE_CODE_DUMP_DIR` unset to disable file
+writes.

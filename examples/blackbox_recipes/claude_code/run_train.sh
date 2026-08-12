@@ -102,6 +102,8 @@ CONDA_ENV="${CONDA_ENV:-testbed}"
 GATEWAY_COUNT="${GATEWAY_COUNT:-1}"
 MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-32}"
 NUM_AGENT_WORKERS="${NUM_AGENT_WORKERS:-8}"
+CLAUDE_CODE_DUMP_DIR="${CLAUDE_CODE_DUMP_DIR:-}"
+CLAUDE_CODE_DIAGNOSTICS="${CLAUDE_CODE_DIAGNOSTICS:-0}"
 RUNNER_ARGS=(
     "actor_rollout_ref.rollout.agent.agent_loop_manager_class=uni_agent.framework.entry.AgentFrameworkRolloutAdapter"
     "actor_rollout_ref.rollout.custom.agent_framework.gateway_count=${GATEWAY_COUNT}"
@@ -139,6 +141,8 @@ export CLAUDE_CODE_TOOL_IMAGE
 export SWE_AGENT_RUN_TIMEOUT
 export CONDA_ENV
 export GATEWAY_COUNT
+export CLAUDE_CODE_DUMP_DIR
+export CLAUDE_CODE_DIAGNOSTICS
 export OPENYUANRONG_SERVER_ADDRESS
 export OPENYUANRONG_TOKEN
 export OPENYUANRONG_TUNNEL_SSL_VERIFY
@@ -153,6 +157,9 @@ echo "Runner:      ${RUNNER}"
 echo "Tool image:  ${CLAUDE_CODE_TOOL_IMAGE}"
 echo "Proxy port:  ${CLAUDE_CODE_PROXY_PORT}"
 echo "Turns:       agent_max_turns=${AGENT_MAX_TURNS}"
+if [[ -n "${CLAUDE_CODE_DUMP_DIR}" ]]; then
+    echo "Dump dir:    ${CLAUDE_CODE_DUMP_DIR}"
+fi
 echo "Batch:       n=${N}, mini_bsz=${PPO_MINI_BATCH_SIZE}"
 echo "Sequence:    prompt=${PROMPT_LENGTH}, response=${RESPONSE_LENGTH}"
 echo "Trainer:     V1 ${TRAINER_MODE}"
@@ -188,6 +195,8 @@ env_vars = {
         "SWE_AGENT_EVAL_TIMEOUT",
         "SWE_AGENT_RUN_TIMEOUT",
         "CLAUDE_CODE_TOOL_IMAGE",
+        "CLAUDE_CODE_DUMP_DIR",
+        "CLAUDE_CODE_DIAGNOSTICS",
         "CONDA_ENV",
         "GATEWAY_COUNT",
     )

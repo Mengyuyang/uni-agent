@@ -46,6 +46,8 @@ export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"
 export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.7}"
 export AGENT_MAX_TURNS
 export SWE_AGENT_EVAL_TIMEOUT="${SWE_AGENT_EVAL_TIMEOUT:-600}"
+export CLAUDE_CODE_DUMP_DIR="${CLAUDE_CODE_DUMP_DIR:-}"
+export CLAUDE_CODE_DIAGNOSTICS="${CLAUDE_CODE_DIAGNOSTICS:-0}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/verl:${PYTHONPATH:-}"
 
 echo "=== Claude Code Blackbox Inference ==="
@@ -54,6 +56,9 @@ echo "Data:        ${DATA_PATH}"
 echo "Max samples: ${MAX_SAMPLES}"
 echo "Engine:      ${ENGINE} (TP=${TP})"
 echo "Tool image:  ${CLAUDE_CODE_TOOL_IMAGE}"
+if [[ -n "${CLAUDE_CODE_DUMP_DIR}" ]]; then
+    echo "Dump dir:    ${CLAUDE_CODE_DUMP_DIR}"
+fi
 echo "Batch:       n=${N}, gateway=${GATEWAY_COUNT}, max_sessions=${MAX_CONCURRENT_SESSIONS}"
 echo "====================================="
 

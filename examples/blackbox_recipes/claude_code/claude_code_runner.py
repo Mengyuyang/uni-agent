@@ -16,6 +16,7 @@ import os
 import shlex
 import time
 from collections.abc import Mapping
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest"
 TOOL_TARGET = "/opt/claude-code"
 DEFAULT_GATEWAY_PROXY_PORT = 38197
+_DIAGNOSTIC_LOG_LIMIT = 4000
 _SWE_REBENCH_GIT_CLEAN_HISTORY = " && ".join(
     [
         "git tag -d $(git tag -l) || true",
@@ -38,6 +40,44 @@ _SWE_REBENCH_GIT_CLEAN_HISTORY = " && ".join(
         "git gc --prune=now || true",
     ]
 )
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _diagnostic_tail(value: str | None) -> str:
+    return (value or "")[-_DIAGNOSTIC_LOG_LIMIT:]
+
+
+def _create_dump_dir(session_id: str, sample_index: int) -> Path | None:
+    dump_root = os.environ.get("CLAUDE_CODE_DUMP_DIR", "").strip()
+    if not dump_root:
+        return None
+
+    safe_session_id = "".join(char if char.isalnum() or char in "._-" else "_" for char in session_id)[:80]
+    session_hash = sha256(session_id.encode()).hexdigest()[:10]
+    run_dir = Path(dump_root).expanduser() / f"sample-{sample_index}-{safe_session_id or 'session'}-{session_hash}"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning("failed to create Claude Code dump directory %s", run_dir, exc_info=True)
+        return None
+    logger.info("[sample %d] dumping Claude Code artifacts to %s", sample_index, run_dir)
+    return run_dir
+
+
+def _dump_text(run_dir: Path | None, name: str, content: str | None) -> None:
+    if run_dir is None:
+        return
+    try:
+        (run_dir / name).write_text(content or "", encoding="utf-8")
+    except OSError:
+        logger.warning("failed to write Claude Code dump artifact %s", run_dir / name, exc_info=True)
+
+
+def _dump_json(run_dir: Path | None, name: str, payload: Mapping) -> None:
+    _dump_text(run_dir, name, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n")
 
 
 def extract_upstream(gateway_url: str) -> str:
@@ -105,21 +145,6 @@ def _extract_issue_text(task: str) -> str:
     return task.strip()
 
 
-def _decode_metadata_list(value) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, list):
-        return [str(item) for item in value]
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return [value]
-        if isinstance(parsed, list):
-            return [str(item) for item in parsed]
-    return [str(value)]
-
-
 def build_claude_task(raw_prompt, tools_kwargs: dict | None = None) -> str:
     if tools_kwargs is None:
         tools_kwargs = {}
@@ -144,32 +169,22 @@ def build_claude_task(raw_prompt, tools_kwargs: dict | None = None) -> str:
 
     task = extract_task(raw_prompt)
     issue = metadata.get("problem_statement") or _extract_issue_text(task)
-    tests = _decode_metadata_list(metadata.get("FAIL_TO_PASS"))
-    if not tests:
-        tests = _decode_metadata_list(metadata.get("PASS_TO_PASS"))[:3]
-    tests_block = (
-        "\n".join(f"- {test}" for test in tests) if tests else "- Run the closest relevant tests you identify."
-    )
 
     return (
         "You are fixing a SWE-bench task in /testbed.\n\n"
         "Issue:\n"
         f"{issue}\n\n"
         "Rules:\n"
-        "- Edit source files only. Do not modify tests.\n"
+        "- Inspect the repository and locate the implementation relevant to the issue.\n"
+        "- Make the minimal required changes to non-test files. Do not modify tests.\n"
         "- The development environment is already installed; do not install packages unless a test command proves it "
         "is necessary.\n"
         "- There is no submit tool in this environment. Do not try to submit.\n"
-        "- Do not create extra edge-case test files after the relevant tests pass.\n"
-        "- Do not run `pytest --collect-only`, `git log`, or any other command that does not directly validate the "
-        "fix.\n"
-        "- Do not analyze unrelated `is_separable` behavior.\n"
-        "- Do not run additional ad-hoc verification after the listed relevant pytest command passes.\n"
         "- Do not commit.\n"
-        "- After the minimal fix is applied and a relevant pytest command passes, print a one-line summary and exit "
-        "immediately.\n\n"
-        "Relevant tests to run after the fix:\n"
-        f"{tests_block}\n"
+        "- Run focused tests that are available in the checkout and/or directly reproduce the behavior described by "
+        "the issue.\n"
+        "- Do not treat one passing pre-existing test as sufficient proof that the requested behavior is fixed.\n"
+        "- Once the implementation and focused validation are complete, print a short summary and exit.\n"
     )
 
 
@@ -281,15 +296,18 @@ async def claude_code_runner(
     logger.info("claude_code_runner called, sample_index=%d", sample_index)
 
     task = build_claude_task(raw_prompt, tools_kwargs)
+    metadata, eval_timeout = build_reward_context(tools_kwargs)
+    evaluator = metadata["evaluator"]
+    dump_dir = _create_dump_dir(session.session_id, sample_index)
+    _dump_text(dump_dir, "prompt.txt", task)
+
     if "task" in tools_kwargs:
         task_config = tools_kwargs["task"]
         if not isinstance(task_config, Mapping):
             raise TypeError(f"tools_kwargs.task must be a mapping, got {type(task_config).__name__}")
-        task_name = task_config.get("name")
         env_config = task_config.get("sandbox", {})
         env_path = "tools_kwargs.task.sandbox"
     else:
-        task_name = None
         env_config = tools_kwargs.get("env", {})
         env_path = "tools_kwargs.env"
 
@@ -312,19 +330,9 @@ async def claude_code_runner(
     )
 
     try:
-        if task_name == "swe_rebench":
+        if evaluator == "swe_rebench":
             # Match SWEREBenchTask.run(): remove future history before the agent reads the repo.
             await sandbox.exec_shell(_SWE_REBENCH_GIT_CLEAN_HISTORY, workdir="/testbed")
-
-        post_setup_cmd = env_config.get("post_setup_cmd", "")
-        if post_setup_cmd:
-            setup_result = await sandbox.exec_shell(post_setup_cmd, timeout=120)
-            if setup_result.exit_code != 0:
-                logger.warning(
-                    "post_setup_cmd failed rc=%s: %.300s",
-                    setup_result.exit_code,
-                    setup_result.stdout + setup_result.stderr,
-                )
 
         claude_base_url = rewrite_gateway_url(gateway_url, proxy_port=proxy_port, strip_v1=True)
         max_turns = int(os.environ.get("AGENT_MAX_TURNS", "100"))
@@ -339,15 +347,48 @@ async def claude_code_runner(
         result = await sandbox.exec_shell(agent_cmd, timeout=int(run_timeout))
         elapsed = time.perf_counter() - started_at
         logger.info("[sample %d] claude-code finished rc=%s elapsed=%.1fs", sample_index, result.exit_code, elapsed)
+        _dump_text(dump_dir, "response.txt", result.stdout)
+        _dump_text(dump_dir, "stderr.txt", result.stderr)
+        _dump_json(
+            dump_dir,
+            "agent.json",
+            {"exit_code": result.exit_code, "elapsed_seconds": elapsed},
+        )
         if result.exit_code != 0:
             logger.warning(
                 "[sample %d] claude-code failed stdout_tail=%r stderr_tail=%r",
                 sample_index,
-                (result.stdout or "")[-4000:],
-                (result.stderr or "")[-4000:],
+                _diagnostic_tail(result.stdout),
+                _diagnostic_tail(result.stderr),
+            )
+        elif _env_flag("CLAUDE_CODE_DIAGNOSTICS"):
+            logger.info(
+                "[sample %d] claude-code succeeded stdout_tail=%r stderr_tail=%r",
+                sample_index,
+                _diagnostic_tail(result.stdout),
+                _diagnostic_tail(result.stderr),
             )
 
-        metadata, eval_timeout = build_reward_context(tools_kwargs)
+        if _env_flag("CLAUDE_CODE_DIAGNOSTICS"):
+            try:
+                repo_state = await sandbox.exec_shell(
+                    "printf '%s\\n' '--- git status --short ---'; "
+                    "git status --short; "
+                    "printf '%s\\n' '--- git diff --stat ---'; "
+                    "git diff --stat",
+                    workdir="/testbed",
+                    timeout=60,
+                )
+                logger.info(
+                    "[sample %d] repository state before reward rc=%s stdout=%r stderr=%r",
+                    sample_index,
+                    repo_state.exit_code,
+                    _diagnostic_tail(repo_state.stdout),
+                    _diagnostic_tail(repo_state.stderr),
+                )
+            except Exception:
+                logger.warning("[sample %d] failed to collect repository diagnostics", sample_index, exc_info=True)
+
         score, eval_result = await evaluate_in_env(SandboxEnvForReward(sandbox), metadata, eval_timeout)
         logger.info("[sample %d] reward done score=%s resolved=%s", sample_index, score, eval_result.get("resolved"))
 
@@ -356,6 +397,7 @@ async def claude_code_runner(
             "claude_code_exit_code": result.exit_code,
             **eval_result,
         }
+        _dump_json(dump_dir, "reward.json", reward_info)
         if not session.reward_info_url:
             raise ValueError(f"reward_info_url is empty for session {session.session_id}")
         async with httpx.AsyncClient(timeout=30.0) as client:
