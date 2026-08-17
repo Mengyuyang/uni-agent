@@ -69,6 +69,10 @@ ensure_ray() {
 
 ensure_ray
 
+mkdir -p "${LOG_DIR}" "$(dirname -- "${RESULT_PATH}")"
+echo "Trajectory dumps: ${LOG_DIR}"
+echo "Inference result: ${RESULT_PATH}"
+
 RUNTIME_ENV_JSON="$("${PYTHON_BIN}" -c '
 import json
 import os
@@ -114,3 +118,6 @@ ray job submit \
     --limit "${LIMIT}" \
     --log-dir "${LOG_DIR}" \
     --result-path "${RESULT_PATH}"
+
+echo "Decode a session with:"
+echo "  python3 examples/tools/dump_trajectory.py ${LOG_DIR}/<session-dir> --tokenizer ${MODEL_PATH} --out /tmp/trajectory-dump"
