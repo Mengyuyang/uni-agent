@@ -119,6 +119,7 @@ echo "Resources:   trainer=1x${N_GPUS_PER_NODE}, rollout=1x${ROLLOUT_NGPUS_PER_N
 echo "Parallelism: train TP/PP/CP=${TRAIN_TP}/${TRAIN_PP}/${TRAIN_CP}, rollout TP=${GEN_TP}"
 echo "Batch:       prompts=${TRAIN_BATCH_SIZE}, n=${N}, mini=${PPO_MINI_BATCH_SIZE}"
 echo "Outputs:     ${LOG_DIR}"
+echo "Trajectories:${AGENT_LOG_DIR}/step_<step>/session-*"
 echo "===================================="
 
 # This full-node training recipe needs a fresh Ray head registered with all 16
