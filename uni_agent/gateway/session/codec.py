@@ -76,6 +76,42 @@ def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, An
     return ("raw", arguments)
 
 
+def _normalize_tool_call_names(function_calls: list[Any], tools: list[dict[str, Any]]) -> list[Any]:
+    """Match parser-returned names to the request's declared tool spelling.
+
+    Some model/parser combinations preserve a generated lower-case function
+    name (for example ``bash``) even when the client declared ``Bash``. Tool
+    names are case-sensitive on the wire, so reconcile only a unique
+    case-insensitive match. Exact matches win and ambiguous names are left
+    untouched.
+    """
+    declared_names = [tool.get("function", {}).get("name") for tool in tools]
+    declared_names = [name for name in declared_names if isinstance(name, str)]
+    exact_names = set(declared_names)
+    names_by_casefold: dict[str, list[str]] = {}
+    for name in declared_names:
+        names_by_casefold.setdefault(name.casefold(), []).append(name)
+
+    normalized_calls: list[Any] = []
+    for function_call in function_calls:
+        name = getattr(function_call, "name", None)
+        if not isinstance(name, str) or name in exact_names:
+            normalized_calls.append(function_call)
+            continue
+
+        candidates = names_by_casefold.get(name.casefold(), [])
+        if len(candidates) != 1:
+            normalized_calls.append(function_call)
+            continue
+
+        declared_name = candidates[0]
+        logger.info("Normalized parsed tool name %r to declared name %r", name, declared_name)
+        normalized_calls.append(
+            SimpleNamespace(name=declared_name, arguments=getattr(function_call, "arguments", None))
+        )
+    return normalized_calls
+
+
 def _process_tool_calls_sglang(
     text: str,
     tools: list[dict[str, Any]],
@@ -129,7 +165,9 @@ def _extract_tool_calls_with_sglang_or_vllm(
 ) -> tuple[str, list[Any]]:
     sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
     try:
-        return _process_tool_calls_sglang(text, tools, sglang_name)
+        content, function_calls = _process_tool_calls_sglang(text, tools, sglang_name)
+        if function_calls:
+            return content, _normalize_tool_call_names(function_calls, tools)
     except ModuleNotFoundError:
         pass
     except Exception:
@@ -137,7 +175,9 @@ def _extract_tool_calls_with_sglang_or_vllm(
 
     vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
     try:
-        return _process_tool_calls_vllm(text, tools, vllm_name, tokenizer)
+        content, function_calls = _process_tool_calls_vllm(text, tools, vllm_name, tokenizer)
+        if function_calls:
+            return content, _normalize_tool_call_names(function_calls, tools)
     except ModuleNotFoundError:
         pass
     except Exception:

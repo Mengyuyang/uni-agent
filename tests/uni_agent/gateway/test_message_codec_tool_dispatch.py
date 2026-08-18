@@ -22,6 +22,20 @@ TOOLS = [
     }
 ]
 
+BASH_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "Bash",
+            "description": "run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            },
+        },
+    }
+]
+
 
 def test_qwen_vllm_parser_uses_tool_schema_for_argument_types():
     import uni_agent.gateway.session.codec as codec_mod
@@ -140,6 +154,69 @@ def test_tool_call_dispatch_falls_back_to_vllm_with_name_mapping(monkeypatch):
     assert content == ""
     assert calls[0].arguments == '{"query":"x"}'
     assert seen["vllm"] == ("raw", TOOLS, "qwen3_xml", tokenizer)
+
+
+def test_tool_call_dispatch_falls_back_when_sglang_finds_no_calls(monkeypatch):
+    import uni_agent.gateway.session.codec as codec_mod
+
+    seen = {}
+
+    def empty_sglang(text, tools, parser_name):
+        seen["sglang"] = (text, tools, parser_name)
+        return text, []
+
+    def fake_vllm(text, tools, parser_name, tokenizer):
+        seen["vllm"] = (text, tools, parser_name, tokenizer)
+        return "", [SimpleNamespace(name="search", arguments='{"query":"x"}')]
+
+    monkeypatch.setattr(codec_mod, "_process_tool_calls_sglang", empty_sglang, raising=False)
+    monkeypatch.setattr(codec_mod, "_process_tool_calls_vllm", fake_vllm, raising=False)
+
+    tokenizer = FakeTokenizer()
+    content, calls = codec_mod._extract_tool_calls_with_sglang_or_vllm("raw", TOOLS, "qwen3_coder", tokenizer)
+
+    assert content == ""
+    assert calls[0].name == "search"
+    assert seen["sglang"] == ("raw", TOOLS, "qwen3_coder")
+    assert seen["vllm"] == ("raw", TOOLS, "qwen3_coder", tokenizer)
+
+
+def test_tool_call_dispatch_normalizes_unique_declared_name_case(monkeypatch):
+    import uni_agent.gateway.session.codec as codec_mod
+
+    def fake_sglang(text, tools, parser_name):
+        return "", [SimpleNamespace(name="bash", arguments='{"command":"find /testbed"}')]
+
+    def fail_vllm(*args, **kwargs):
+        raise AssertionError("vLLM should not run when SGLang finds a tool call")
+
+    monkeypatch.setattr(codec_mod, "_process_tool_calls_sglang", fake_sglang, raising=False)
+    monkeypatch.setattr(codec_mod, "_process_tool_calls_vllm", fail_vllm, raising=False)
+
+    content, calls = codec_mod._extract_tool_calls_with_sglang_or_vllm(
+        "<tool_call><function=bash>...</function></tool_call>",
+        BASH_TOOLS,
+        "qwen3_coder",
+        FakeTokenizer(),
+    )
+
+    assert content == ""
+    assert calls[0].name == "Bash"
+    assert calls[0].arguments == '{"command":"find /testbed"}'
+
+
+def test_tool_call_name_normalization_leaves_ambiguous_case_untouched():
+    import uni_agent.gateway.session.codec as codec_mod
+
+    tools = [
+        {"type": "function", "function": {"name": "Bash", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "BASH", "parameters": {"type": "object"}}},
+    ]
+    call = SimpleNamespace(name="bash", arguments="{}")
+
+    normalized = codec_mod._normalize_tool_call_names([call], tools)
+
+    assert normalized == [call]
 
 
 def test_tool_call_dispatch_returns_text_when_backends_unavailable(monkeypatch):
