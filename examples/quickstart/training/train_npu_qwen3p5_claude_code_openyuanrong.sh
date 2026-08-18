@@ -64,6 +64,10 @@ NUM_AGENT_WORKERS="${NUM_AGENT_WORKERS:-16}"
 PROMPT_LENGTH="${PROMPT_LENGTH:-4096}"
 RESPONSE_LENGTH="${RESPONSE_LENGTH:-75536}"
 MAX_MODEL_LEN=$((PROMPT_LENGTH + RESPONSE_LENGTH))
+# Keep long-context capacity, but bound each Qwen3.5 prefill chunk. The failing
+# A3 vLLM-Ascend run submitted 19,456 tokens to its first native kernel launch.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
+VLLM_ASYNC_SCHEDULING="${VLLM_ASYNC_SCHEDULING:-false}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 TOP_P="${TOP_P:-1.0}"
 TOP_K="${TOP_K:--1}"
@@ -83,6 +87,19 @@ PAD_BSHD_TO_MINIBATCH_MAX="${PAD_BSHD_TO_MINIBATCH_MAX:-True}"
 RECOMPUTE_GRANULARITY="${RECOMPUTE_GRANULARITY:-full}"
 RECOMPUTE_METHOD="${RECOMPUTE_METHOD:-uniform}"
 RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-1}"
+
+[[ "${MAX_NUM_BATCHED_TOKENS}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "MAX_NUM_BATCHED_TOKENS must be a positive integer: ${MAX_NUM_BATCHED_TOKENS}" >&2
+    exit 1
+}
+if ((MAX_NUM_BATCHED_TOKENS > MAX_MODEL_LEN)); then
+    echo "MAX_NUM_BATCHED_TOKENS (${MAX_NUM_BATCHED_TOKENS}) exceeds MAX_MODEL_LEN (${MAX_MODEL_LEN})." >&2
+    exit 1
+fi
+if [[ "${VLLM_ASYNC_SCHEDULING}" != "true" && "${VLLM_ASYNC_SCHEDULING}" != "false" ]]; then
+    echo "VLLM_ASYNC_SCHEDULING must be true or false: ${VLLM_ASYNC_SCHEDULING}" >&2
+    exit 1
+fi
 
 # Canonical Task/Agent framework settings.
 TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"
@@ -118,6 +135,7 @@ echo "Task config: ${TASK_CONFIG}"
 echo "Resources:   trainer=1x${N_GPUS_PER_NODE}, rollout=1x${ROLLOUT_NGPUS_PER_NODE}"
 echo "Parallelism: train TP/PP/CP=${TRAIN_TP}/${TRAIN_PP}/${TRAIN_CP}, rollout TP=${GEN_TP}"
 echo "Batch:       prompts=${TRAIN_BATCH_SIZE}, n=${N}, mini=${PPO_MINI_BATCH_SIZE}"
+echo "Rollout:     max_model_len=${MAX_MODEL_LEN}, prefill_chunk=${MAX_NUM_BATCHED_TOKENS}, async_scheduling=${VLLM_ASYNC_SCHEDULING}"
 echo "Outputs:     ${LOG_DIR}"
 echo "Trajectories:${AGENT_LOG_DIR}/step_<step>/session-*"
 echo "===================================="
@@ -235,7 +253,7 @@ MAIN_CMD=(
     actor_rollout_ref.rollout.prompt_length="${PROMPT_LENGTH}"
     actor_rollout_ref.rollout.response_length="${RESPONSE_LENGTH}"
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
-    actor_rollout_ref.rollout.max_num_batched_tokens="${MAX_MODEL_LEN}"
+    actor_rollout_ref.rollout.max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS}"
     actor_rollout_ref.rollout.temperature="${TEMPERATURE}"
     actor_rollout_ref.rollout.top_p="${TOP_P}"
     actor_rollout_ref.rollout.top_k="${TOP_K}"
@@ -273,7 +291,7 @@ MAIN_CMD=(
     ++actor_rollout_ref.rollout.custom.agent_framework.use_reward_loop_worker=False
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"'
     +actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=true
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=true
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling="${VLLM_ASYNC_SCHEDULING}"
     algorithm.adv_estimator=grpo
     algorithm.use_kl_in_reward=False
     algorithm.kl_ctrl.kl_coef=0.0
