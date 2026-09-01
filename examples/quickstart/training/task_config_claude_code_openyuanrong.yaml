@@ -1,0 +1,63 @@
+# Claude Code training/validation on OpenYuanrong.
+#
+# Dataset rows keep only canonical SWE image names. These rules map them to the
+# OpenYuanrong registry, mount the prebuilt Claude Code runtime, and reserve the
+# sandbox-local reverse-tunnel port. run_task injects the per-session upstream
+# and rewrites agent.model.base_url to http://127.0.0.1:38197/... at runtime.
+#
+# The sidecar image below is the public recipe's historical default. Pin the
+# tag to the version validated by your OpenYuanrong environment before a full
+# run; the executable path must match the mounted image layout.
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/claude-code
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest
+  agent:
+    name: claude_code
+    executable: /opt/claude-code/bin/claude
+    max_turns: 200
+    run_timeout: 4800
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072
+  prompt_template: &swe_claude_prompt
+    - role: user
+      content: |-
+        Read the following task description and resolve the issue in the current directory.
+
+        Task description:
+        {problem_statement}
+
+        Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate tests or checks. Do not modify tests or commit changes. When finished, briefly summarize what changed and how it was verified.
+
+- name: swe_rebench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    image_map:
+      - from: "swerebench/sweb.eval.x86_64.**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/claude-code
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest
+  agent:
+    name: claude_code
+    executable: /opt/claude-code/bin/claude
+    max_turns: 200
+    run_timeout: 4800
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072
+  prompt_template: *swe_claude_prompt

@@ -36,6 +36,8 @@ class _FakeSandbox:
         self.calls.append({"script": script, "timeout": timeout})
         if script.startswith("command -v claude"):
             return ExecResult(exit_code=self.probe_results.pop(0), stdout="", stderr="")
+        if script.startswith("test -x "):
+            return ExecResult(exit_code=self.probe_results.pop(0), stdout="", stderr="")
         if script.startswith("command -v npm"):
             return ExecResult(exit_code=0 if self.npm_available else 1, stdout="", stderr="")
         stderr = self.install_stderr if self.install_exit_code else ""
@@ -57,6 +59,25 @@ def test_ensure_claude_skips_install_when_already_available():
 
     assert len(sandbox.calls) == 1
     assert sandbox.calls[0]["script"].startswith("command -v claude")
+
+
+def test_ensure_claude_skips_install_for_configured_sidecar_executable():
+    sandbox = _FakeSandbox(probe_results=[0])
+    agent = ClaudeCodeAgent(ClaudeCodeConfig(executable="/opt/claude-code/bin/claude"))
+
+    asyncio.run(agent._ensure_claude(sandbox))
+
+    assert [call["script"] for call in sandbox.calls] == ["test -x /opt/claude-code/bin/claude"]
+
+
+def test_ensure_claude_fails_fast_when_configured_sidecar_executable_is_missing():
+    sandbox = _FakeSandbox(probe_results=[1])
+    agent = ClaudeCodeAgent(ClaudeCodeConfig(executable="/opt/claude-code/bin/claude"))
+
+    with pytest.raises(RuntimeError, match="configured executable is not executable"):
+        asyncio.run(agent._ensure_claude(sandbox))
+
+    assert [call["script"] for call in sandbox.calls] == ["test -x /opt/claude-code/bin/claude"]
 
 
 def test_ensure_claude_installs_and_rechecks_path():
@@ -220,6 +241,17 @@ def test_claude_argv_controls_web_tools_and_subagents_independently(
 
     disallowed_tools = argv[argv.index("--disallowedTools") + 1].split(",")
     assert set(disallowed_tools) == expected_disallowed
+
+
+def test_claude_argv_uses_configured_sidecar_executable():
+    config = ClaudeCodeConfig(
+        executable="/opt/claude-code/bin/claude",
+        model=ModelConfig(model_name="policy"),
+    )
+
+    argv = ClaudeCodeAgent(config)._claude_argv("fix the bug")
+
+    assert argv[:2] == ["/opt/claude-code/bin/claude", "-p"]
 
 
 @pytest.mark.parametrize(("enable_subagents", "expected_model"), [(False, None), (True, "policy")])

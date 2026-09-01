@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -xeuo pipefail
+# Do not enable `set -x`: OpenYuanrong credentials are forwarded to Ray actors
+# below and must not be echoed into the job log.
+set -euo pipefail
 
 project_name=${PROJECT_NAME:-"Uni-Agent-Qwen3.5-4B-megatron"}
 exp_name=${EXP_NAME:-"$(date +%Y%m%d%H)_exp"}
@@ -22,6 +24,31 @@ GATEWAY_COUNT=${GATEWAY_COUNT:-8}            # gateway actors fronting the engin
 CONCURRENCY=${CONCURRENCY:-256}              # max in-flight rollout sessions (runner cap)
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"$(basename "${MODEL_PATH}")"}
 MASK_UNFINISHED_EPISODE=${MASK_UNFINISHED_EPISODE:-False}  # opt-in: zero the loss mask for unfinished episodes
+
+# OpenYuanrong credentials need to be propagated through verl's nested
+# ray.init runtime environment: `ray job submit` only configures the driver,
+# while the task runner executes in rollout workers. Kept optional so the
+# existing veFaaS recipe remains unchanged.
+OPENYUANRONG_SERVER_ADDRESS="${OPENYUANRONG_SERVER_ADDRESS:-}"
+OPENYUANRONG_TOKEN="${OPENYUANRONG_TOKEN:-}"
+OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
+USE_OPENYUANRONG_SDK="${USE_OPENYUANRONG_SDK:-0}"
+SANDBOX_NAME_PREFIX="${SANDBOX_NAME_PREFIX:-cc-yuanrong-}"
+RAY_INIT_ENV_ARGS=()
+if [[ -n "${OPENYUANRONG_SERVER_ADDRESS}" || -n "${OPENYUANRONG_TOKEN}" ]]; then
+    : "${OPENYUANRONG_SERVER_ADDRESS:?Set OPENYUANRONG_SERVER_ADDRESS}"
+    : "${OPENYUANRONG_TOKEN:?Set OPENYUANRONG_TOKEN}"
+    RAY_INIT_ENV_ARGS=(
+        "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_SERVER_ADDRESS=\"${OPENYUANRONG_SERVER_ADDRESS}\""
+        "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TOKEN=\"${OPENYUANRONG_TOKEN}\""
+        "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TUNNEL_SSL_VERIFY=\"${OPENYUANRONG_TUNNEL_SSL_VERIFY}\""
+        "+ray_kwargs.ray_init.runtime_env.env_vars.USE_OPENYUANRONG_SDK=\"${USE_OPENYUANRONG_SDK}\""
+        "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_NAME_PREFIX=\"${SANDBOX_NAME_PREFIX}\""
+    )
+elif [[ "${TASK_CONFIG}" == *"openyuanrong"* ]]; then
+    echo "TASK_CONFIG=${TASK_CONFIG} requires OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN" >&2
+    exit 2
+fi
 
 rollout_mode=${ROLLOUT_MODE:-"async"}
 rollout_name=${ROLLOUT_NAME:-"vllm"} # sglang or vllm
@@ -106,6 +133,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
     python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
+    "${RAY_INIT_ENV_ARGS[@]}" \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
     trainer.v1.colocate_async.num_warmup_batches=${num_warmup_batches} \

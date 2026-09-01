@@ -1,0 +1,28 @@
+# Copy this file to a private/shared runtime location, fill in the credentials,
+# and pass it as RUNTIME_ENV. Do not commit real tokens to the repository.
+#
+# Training additionally requires these values in the launch shell because the
+# training script passes them through verl's nested ray.init environment.
+working_dir: ./
+excludes:
+  - "/.git/"
+
+pip:
+  packages:
+    - "akernel_sdk"
+    - "openyuanrong_sdk"
+    - "swebench==4.1.0"
+
+env_vars:
+  PYTHONPATH: "verl"
+  PYTHONNOUSERSITE: "1"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+
+  # OpenYuanrongSandbox uses akernel_sdk by default. Set this to "1" only
+  # when your environment intentionally uses openyuanrong_sandbox_sdk.
+  USE_OPENYUANRONG_SDK: "0"
+  OPENYUANRONG_SERVER_ADDRESS: "<server-address>"
+  OPENYUANRONG_TOKEN: "<token>"
+  OPENYUANRONG_TUNNEL_SSL_VERIFY: "0"
+  SANDBOX_NAME_PREFIX: "cc-yuanrong-"

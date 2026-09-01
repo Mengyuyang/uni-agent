@@ -64,6 +64,13 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_P = 0.9
 DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
+_OPENYUANRONG_RUNTIME_ENV_KEYS = (
+    "OPENYUANRONG_SERVER_ADDRESS",
+    "OPENYUANRONG_TOKEN",
+    "OPENYUANRONG_TUNNEL_SSL_VERIFY",
+    "USE_OPENYUANRONG_SDK",
+    "SANDBOX_NAME_PREFIX",
+)
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -72,6 +79,19 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
         return ch * width
     pad = max(0, width - len(text) - 2)
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
+
+
+def _propagate_openyuanrong_runtime_env(config) -> None:
+    """Copy OpenYuanrong settings from the job driver to nested rollout workers.
+
+    ``ray job submit --runtime-env`` prepares this inference driver, but verl
+    starts its rollout actors with a separate ``ray.init`` runtime environment.
+    Forward only the provider-specific keys that are actually set so non-
+    OpenYuanrong inference keeps its existing environment unchanged.
+    """
+    for key in _OPENYUANRONG_RUNTIME_ENV_KEYS:
+        if value := os.getenv(key):
+            OmegaConf.update(config, f"ray_kwargs.ray_init.runtime_env.env_vars.{key}", value, force_add=True)
 
 
 def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
@@ -151,6 +171,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # TransferQueue carries the rollout trajectories (and their rm_scores).
     OmegaConf.update(config, "transfer_queue.enable", True, force_add=True)
+    _propagate_openyuanrong_runtime_env(config)
 
     # Data.
     config.data.return_raw_chat = True

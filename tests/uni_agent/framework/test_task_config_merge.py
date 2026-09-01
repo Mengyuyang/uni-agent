@@ -1,12 +1,77 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
 from uni_agent.tasks import TaskConfig, TaskConfigResolver, get_task
 
 _LOCAL_SANDBOX = {"provider": "local"}
+_OPENYUANRONG_CLAUDE_CONFIG = (
+    Path(__file__).parents[3] / "examples" / "quickstart" / "training" / "task_config_claude_code_openyuanrong.yaml"
+)
+
+
+@pytest.mark.parametrize(
+    ("task_name", "canonical_image", "mapped_image"),
+    [
+        (
+            "swe_bench",
+            "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",
+            "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/"
+            "sweb.eval.x86_64.astropy_1776_astropy-12907:v2",
+        ),
+        (
+            "swe_rebench",
+            "swerebench/sweb.eval.x86_64.astropy_1776_astropy-12907",
+            "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/astropy_1776_astropy-12907:latest",
+        ),
+    ],
+)
+def test_openyuanrong_claude_task_config_maps_images_and_mounts_sidecar(
+    task_name,
+    canonical_image,
+    mapped_image,
+):
+    resolved = TaskConfigResolver.from_file(str(_OPENYUANRONG_CLAUDE_CONFIG)).resolve(
+        {
+            "name": task_name,
+            "sandbox": {"image": canonical_image},
+            "metadata": {"problem_statement": "Fix the parser"},
+        },
+        runtime_model={
+            "base_url": "http://gateway:8000/sessions/test/v1",
+            "api_key": "EMPTY",
+            "model_name": "Qwen3.5-27B",
+        },
+    )
+
+    config = get_task(resolved).config
+
+    assert config.sandbox.provider == "openyuanrong"
+    assert config.sandbox.image == mapped_image
+    assert config.sandbox.sandbox_kwargs["proxy_port"] == 38197
+    assert config.sandbox.sandbox_kwargs["mounts"] == [
+        {
+            "target": "/opt/claude-code",
+            "image_url": "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest",
+        }
+    ]
+    assert config.agent.executable == "/opt/claude-code/bin/claude"
+    assert config.agent.model.model_name == "Qwen3.5-27B"
+    assert config.prompt == [
+        {
+            "role": "user",
+            "content": (
+                "Read the following task description and resolve the issue in the current directory.\n\n"
+                "Task description:\nFix the parser\n\n"
+                "Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate "
+                "tests or checks. Do not modify tests or commit changes. When finished, briefly summarize what changed "
+                "and how it was verified."
+            ),
+        }
+    ]
 
 
 def test_task_config_has_no_logging_runtime_fields():
