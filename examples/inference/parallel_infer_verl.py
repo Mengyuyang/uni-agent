@@ -49,6 +49,7 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
+from uni_agent.runtime_env import pythonpath_with_resolved_package_roots
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -92,6 +93,17 @@ def _propagate_openyuanrong_runtime_env(config) -> None:
     for key in _OPENYUANRONG_RUNTIME_ENV_KEYS:
         if value := os.getenv(key):
             OmegaConf.update(config, f"ray_kwargs.ray_init.runtime_env.env_vars.{key}", value, force_add=True)
+
+
+def _propagate_worker_pythonpath(config) -> None:
+    """Make nested Ray workers import the same physical packages as the driver."""
+    config_key = "ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH"
+    worker_pythonpath = pythonpath_with_resolved_package_roots(
+        ("vllm", "verl", "uni_agent"),
+        OmegaConf.select(config, config_key),
+        os.getenv("PYTHONPATH"),
+    )
+    OmegaConf.update(config, config_key, worker_pythonpath, force_add=True)
 
 
 def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
@@ -171,6 +183,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # TransferQueue carries the rollout trajectories (and their rm_scores).
     OmegaConf.update(config, "transfer_queue.enable", True, force_add=True)
+    _propagate_worker_pythonpath(config)
     _propagate_openyuanrong_runtime_env(config)
 
     # Data.

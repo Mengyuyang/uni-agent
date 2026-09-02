@@ -49,6 +49,10 @@ import importlib
 for name in ("ray", "verl", "uni_agent", "vllm", "datasets"):
     module = importlib.import_module(name)
     print(f"dependency ok: {name} -> {getattr(module, '__file__', '<namespace>')}")
+
+from vllm import LLM
+
+print(f"dependency ok: vllm.LLM -> {LLM}")
 PY
 
 exec env RAY_ADDRESS="${RAY_ADDRESS:-auto}" python3 examples/inference/parallel_infer_verl.py \
