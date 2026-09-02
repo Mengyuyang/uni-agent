@@ -14,11 +14,18 @@ TASK_CONFIG="${REPO_ROOT}/examples/quickstart/training/task_config_claude_code_o
 LOG_DIR="/mnt/share/z00876269/logs/cc-yuanrong-single"
 RESULT_PATH="${LOG_DIR}/result.json"
 
-# Qwen3.5-35B-A3B on one 16-NPU node: use two TP8 rollout groups. This matches
-# the validated verl Ascend topology (16 devices per node, GEN_TP=8).
-TP=8
-NNODES=1
-N_DEVICES_PER_NODE=16
+# A single Qwen3.5-35B-A3B TP8 rollout replica. This avoids scheduling a
+# second replica on NPUs 8-15. On an otherwise idle node Ray normally assigns
+# the first eight devices. Override inline for a 16-NPU run:
+#   N_DEVICES_PER_NODE=16 bash examples/quickstart/inference/run_single_infer_claude_code_openyuanrong.sh
+TP="${TP:-8}"
+NNODES="${NNODES:-1}"
+N_DEVICES_PER_NODE="${N_DEVICES_PER_NODE:-8}"
+
+if (( N_DEVICES_PER_NODE % TP != 0 )); then
+    echo "N_DEVICES_PER_NODE (${N_DEVICES_PER_NODE}) must be divisible by TP (${TP})." >&2
+    exit 2
+fi
 
 for name in OPENYUANRONG_SERVER_ADDRESS OPENYUANRONG_TOKEN; do
     if [[ -z "${!name:-}" ]]; then
