@@ -14,11 +14,11 @@ TASK_CONFIG="${REPO_ROOT}/examples/quickstart/training/task_config_claude_code_o
 LOG_DIR="/mnt/share/z00876269/logs/cc-yuanrong-single"
 RESULT_PATH="${LOG_DIR}/result.json"
 
-# The defaults below assume one node with eight accelerator resources. Change
-# these three values in this file if the Ray cluster topology is different.
+# Qwen3.5-35B-A3B on one 16-NPU node: use two TP8 rollout groups. This matches
+# the validated verl Ascend topology (16 devices per node, GEN_TP=8).
 TP=8
 NNODES=1
-N_DEVICES_PER_NODE=8
+N_DEVICES_PER_NODE=16
 
 for name in OPENYUANRONG_SERVER_ADDRESS OPENYUANRONG_TOKEN; do
     if [[ -z "${!name:-}" ]]; then
@@ -37,6 +37,12 @@ done
 cd "${REPO_ROOT}"
 mkdir -p "${LOG_DIR}"
 
+if ! ray status >/dev/null 2>&1; then
+    echo "No running Ray cluster was found." >&2
+    echo "Start the 16-NPU Ray head first, then rerun this script." >&2
+    exit 2
+fi
+
 python3 - <<'PY'
 import importlib
 
@@ -45,7 +51,7 @@ for name in ("ray", "verl", "uni_agent", "vllm", "datasets"):
     print(f"dependency ok: {name} -> {getattr(module, '__file__', '<namespace>')}")
 PY
 
-exec python3 examples/inference/parallel_infer_verl.py \
+exec env RAY_ADDRESS="${RAY_ADDRESS:-auto}" python3 examples/inference/parallel_infer_verl.py \
     --data-path "${DATA_PATH}" \
     --model-path "${MODEL_PATH}" \
     --served-model-name "Qwen3.5-35B-A3B" \
