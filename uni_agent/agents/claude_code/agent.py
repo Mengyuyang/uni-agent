@@ -11,6 +11,7 @@ No proxy process.
 from __future__ import annotations
 
 import logging
+import shlex
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +66,11 @@ class ClaudeCodeConfig(AgentConfig):
     """Black-box launch params for Claude Code (policy endpoint lives on :attr:`AgentConfig.model`)."""
 
     name: str = "claude_code"
+    executable: str = Field(
+        default="claude",
+        min_length=1,
+        description="Claude Code executable name or explicit sidecar path.",
+    )
     max_turns: int | None = Field(default=80, description="--max-turns budget; None to omit.")
     enable_web_tools: bool = Field(
         default=False,
@@ -141,8 +147,17 @@ class ClaudeCodeAgent(Agent):
 
     # ----- helpers -----
     async def _ensure_claude(self, sandbox: Sandbox) -> None:
-        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code == 0:
+        cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
+        probe_command = self._claude_probe_command()
+        if (await sandbox.exec_shell(probe_command)).exit_code == 0:
+            logger.info("claude_code: using configured executable %s", cfg.executable)
             return
+
+        if "/" in cfg.executable:
+            raise RuntimeError(
+                "claude_code: configured executable is not executable: "
+                f"{cfg.executable}; refusing to install a fallback Claude Code binary"
+            )
 
         has_npm = (await sandbox.exec_shell("command -v npm >/dev/null 2>&1")).exit_code == 0
         install_method = "npm" if has_npm else "native installer"
@@ -153,9 +168,16 @@ class ClaudeCodeAgent(Agent):
             detail = (result.stderr or result.stdout or "unknown error").strip()[-2000:]
             raise RuntimeError(f"claude_code: failed to install Claude Code with {install_method}: {detail}")
 
-        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code != 0:
+        if (await sandbox.exec_shell(probe_command)).exit_code != 0:
             raise RuntimeError("claude_code: installation finished but claude is not available on PATH")
         logger.info("claude_code: installation completed")
+
+    def _claude_probe_command(self) -> str:
+        cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
+        executable = shlex.quote(cfg.executable)
+        if "/" in cfg.executable:
+            return f"test -x {executable}"
+        return f"command -v {executable} >/dev/null 2>&1"
 
     def _claude_argv(self, user_prompt: str) -> list[str]:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
@@ -163,7 +185,7 @@ class ClaudeCodeAgent(Agent):
         if not model:
             raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
         argv = [
-            "claude",
+            cfg.executable,
             "-p",
             user_prompt,
             "--model",

@@ -28,9 +28,11 @@ endpoint is the gateway session, bound by the runner, not a flag.
 """
 
 import argparse
+import importlib
 import json
 import logging
 import os
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -49,6 +51,7 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
+from uni_agent.runtime_env import pythonpath_with_resolved_package_roots
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -64,6 +67,13 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_P = 0.9
 DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
+_OPENYUANRONG_RUNTIME_ENV_KEYS = (
+    "OPENYUANRONG_SERVER_ADDRESS",
+    "OPENYUANRONG_TOKEN",
+    "OPENYUANRONG_TUNNEL_SSL_VERIFY",
+    "USE_OPENYUANRONG_SDK",
+    "SANDBOX_NAME_PREFIX",
+)
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -72,6 +82,63 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
         return ch * width
     pad = max(0, width - len(text) - 2)
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
+
+
+def _build_ray_runtime_env(engine: str) -> dict:
+    """Build the job-level environment inherited by every Ray actor.
+
+    This must be passed to the first ``ray.init`` so checkpoint actors import
+    the same editable packages resolved by the driver.
+    """
+    package_names = ("vllm", "verl", "uni_agent") if engine == "vllm" else ("sglang", "verl", "uni_agent")
+    env_vars = {
+        "PYTHONPATH": pythonpath_with_resolved_package_roots(
+            package_names,
+            os.getenv("PYTHONPATH"),
+        )
+    }
+    for key in _OPENYUANRONG_RUNTIME_ENV_KEYS:
+        if value := os.getenv(key):
+            env_vars[key] = value
+    return {"env_vars": env_vars}
+
+
+def _probe_worker_engine_import(engine: str) -> dict:
+    """Return import details from a Ray worker, failing early on a bad package."""
+    package_name = "vllm" if engine == "vllm" else "sglang"
+    module = importlib.import_module(package_name)
+    if engine == "vllm" and not hasattr(module, "LLM"):
+        raise ImportError(
+            "Ray worker resolved vllm without its LLM API: "
+            f"file={getattr(module, '__file__', None)!r}, "
+            f"path={list(getattr(module, '__path__', []))!r}, "
+            f"sys.path={sys.path!r}"
+        )
+    return {
+        "package": package_name,
+        "file": getattr(module, "__file__", None),
+        "path": list(getattr(module, "__path__", [])),
+    }
+
+
+def _validate_worker_engine_import(engine: str) -> None:
+    """Verify the engine import before starting the expensive worker group."""
+    probe = ray.remote(num_cpus=0)(_probe_worker_engine_import)
+    details = ray.get(probe.remote(engine))
+    logger.info("Ray worker engine import verified: %s", details)
+
+
+def _propagate_openyuanrong_runtime_env(config) -> None:
+    """Copy OpenYuanrong settings from the job driver to nested rollout workers.
+
+    ``ray job submit --runtime-env`` prepares this inference driver, but verl
+    starts its rollout actors with a separate ``ray.init`` runtime environment.
+    Forward only the provider-specific keys that are actually set so non-
+    OpenYuanrong inference keeps its existing environment unchanged.
+    """
+    for key in _OPENYUANRONG_RUNTIME_ENV_KEYS:
+        if value := os.getenv(key):
+            OmegaConf.update(config, f"ray_kwargs.ray_init.runtime_env.env_vars.{key}", value, force_add=True)
 
 
 def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
@@ -151,6 +218,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # TransferQueue carries the rollout trajectories (and their rm_scores).
     OmegaConf.update(config, "transfer_queue.enable", True, force_add=True)
+    _propagate_openyuanrong_runtime_env(config)
 
     # Data.
     config.data.return_raw_chat = True
@@ -369,7 +437,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    ray.init()
+    ray.init(runtime_env=_build_ray_runtime_env(args.engine))
+    _validate_worker_engine_import(args.engine)
 
     resolver = TaskConfigResolver.from_file(args.task_config)
     served_model_name = args.served_model_name or os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
