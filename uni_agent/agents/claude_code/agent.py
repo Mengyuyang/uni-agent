@@ -149,6 +149,8 @@ class ClaudeCodeAgent(Agent):
     async def _ensure_claude(self, sandbox: Sandbox) -> None:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
         probe_command = self._claude_probe_command()
+        if "/" in cfg.executable:
+            logger.info("claude_code: checking configured sidecar executable %s", cfg.executable)
         if (await sandbox.exec_shell(probe_command)).exit_code == 0:
             logger.info("claude_code: using preinstalled executable %s", cfg.executable)
             return
@@ -157,6 +159,11 @@ class ClaudeCodeAgent(Agent):
         # silently fall back to a network install when that mount is missing or
         # has the wrong layout; fail with the path that needs fixing instead.
         if "/" in cfg.executable:
+            logger.error(
+                "claude_code: sidecar executable is missing or not executable: %s; "
+                "refusing npm/native-install fallback",
+                cfg.executable,
+            )
             raise RuntimeError(f"claude_code: configured executable is not executable: {cfg.executable}")
 
         has_npm = (await sandbox.exec_shell("command -v npm >/dev/null 2>&1")).exit_code == 0
