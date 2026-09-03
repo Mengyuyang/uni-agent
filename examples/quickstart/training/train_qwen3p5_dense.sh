@@ -10,7 +10,10 @@ MODEL_PATH=${MODEL_PATH:-"${DATA_DIR}/models/Qwen3.5-4B"}
 TRAIN_FILE=${TRAIN_FILE:-"${DATA_DIR}/data/uni_agent/swe_rebench_filtered_1150.parquet"}
 TEST_FILE=${TEST_FILE:-"${DATA_DIR}/data/uni_agent/swe_bench_verified.parquet"}
 
-RUNTIME_ENV=${RUNTIME_ENV:-"${RUNTIME_DIR}/data/uni_agent/runtime_env.yaml"}
+# Set RUNTIME_ENV to an empty string to submit against the packages already
+# installed on the Ray cluster.  This is useful on managed clusters where
+# `verl`, vLLM and the sandbox SDK are preinstalled.
+RUNTIME_ENV=${RUNTIME_ENV-"${RUNTIME_DIR:-}/data/uni_agent/runtime_env.yaml"}
 CKPTS_DIR=${CKPTS_DIR:-"${RUNTIME_DIR}/ckpts/${project_name}/${exp_name}"}
 AGENT_LOG_DIR=${AGENT_LOG_DIR:-"${RUNTIME_DIR}/logs/${project_name}/${exp_name}"}
 # Must be launched from the repository root so Ray packages both `verl/` and `uni_agent/`.
@@ -115,6 +118,31 @@ train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-16}
 num_warmup_batches=${NUM_WARMUP_BATCHES:-1}
 lr_decay_steps=${LR_DECAY_STEPS:-2000}
 test_freq=${TEST_FREQ:-10}
+save_freq=${SAVE_FREQ:-10}
+total_epochs=${TOTAL_EPOCHS:-10}
+total_training_steps=${TOTAL_TRAINING_STEPS:-}
+
+# A finite step count is particularly useful for validating that a black-box
+# Agent can return a task reward before starting an expensive full training
+# run.  Keep the argument absent by default to retain the original
+# epoch-driven recipe behaviour.
+TRAINER_STEP_ARGS=()
+if [[ -n "${total_training_steps}" ]]; then
+    TRAINER_STEP_ARGS+=("trainer.total_training_steps=${total_training_steps}")
+fi
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+RAY_SUBMIT_ARGS=(--no-wait)
+if [[ -n "${RUNTIME_ENV}" ]]; then
+    if [[ ! -f "${RUNTIME_ENV}" ]]; then
+        echo "RUNTIME_ENV does not exist: ${RUNTIME_ENV}" >&2
+        exit 2
+    fi
+    RAY_SUBMIT_ARGS+=(--runtime-env "${RUNTIME_ENV}")
+else
+    RAY_SUBMIT_ARGS+=(--working-dir "${REPO_ROOT}")
+    echo "RUNTIME_ENV is empty: using packages already installed on the Ray cluster."
+fi
 
 # ============================================================================
 # Rollout correction is disabled by default for the standard GRPO + PPO
@@ -129,8 +157,8 @@ rollout_is_batch_normalize=${ROLLOUT_IS_BATCH_NORMALIZE:-False}  # normalize IS 
 rollout_rs=${ROLLOUT_RS:-null}                                   # no rejection sampling
 rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD:-null}
 
-ray job submit --no-wait --runtime-env $RUNTIME_ENV \
-    -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
+ray job submit "${RAY_SUBMIT_ARGS[@]}" -- \
+    env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
     python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
     "${RAY_INIT_ENV_ARGS[@]}" \
@@ -261,8 +289,9 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.val_before_train=False \
-    trainer.save_freq=10 \
-    trainer.total_epochs=10 \
+    trainer.save_freq=${save_freq} \
+    trainer.total_epochs=${total_epochs} \
+    "${TRAINER_STEP_ARGS[@]}" \
     trainer.resume_mode=auto \
     trainer.log_val_generations=10 \
     trainer.default_local_dir="${CKPTS_DIR}" \
