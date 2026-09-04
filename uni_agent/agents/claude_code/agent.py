@@ -11,7 +11,6 @@ No proxy process.
 from __future__ import annotations
 
 import logging
-import shlex
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +24,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_CC_QUIET_ENV = {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    "CLAUDE_CODE_FORK_SUBAGENT": "0",
+    "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1",
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+}
 
 _CLAUDE_NPM_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code --no-audit --no-fund"
 _CLAUDE_NATIVE_INSTALL_COMMAND = r"""
@@ -66,29 +74,20 @@ class ClaudeCodeConfig(AgentConfig):
     """Black-box launch params for Claude Code (policy endpoint lives on :attr:`AgentConfig.model`)."""
 
     name: str = "claude_code"
-    executable: str = Field(
-        default="claude",
-        min_length=1,
-        description="Claude Code executable name or explicit sidecar path.",
-    )
     max_turns: int | None = Field(default=80, description="--max-turns budget; None to omit.")
-    enable_web_tools: bool = Field(
-        default=False,
-        description="Allow Claude Code to use WebFetch and WebSearch during a rollout.",
+    disallowed_tools: list[str] = Field(
+        default_factory=lambda: ["Agent", "Task", "WebFetch", "WebSearch", "AskUserQuestion"],
+        description=(
+            "--disallowedTools deny-list. Subagent, web, and interactive-user tools are disabled "
+            "to keep each headless rollout self-contained and deterministic."
+        ),
     )
-    enable_subagents: bool = Field(
-        default=False,
-        description="Allow Claude Code to dispatch subagents through the Agent/Task tool.",
-    )
-    disable_slash_commands: bool = Field(
-        default=True,
-        description="Disable Claude Code skills and slash commands for deterministic rollouts.",
+    permission_mode: str = Field(
+        default="bypassPermissions",
+        description="Claude Code --permission-mode used for unattended Sandbox execution.",
     )
     verbose: bool = Field(default=False, description="Pass --verbose (streams per-turn detail; noisy at scale).")
-    run_timeout: float = Field(
-        default=1800.0,
-        description="Maximum wall-clock time (s) for Claude Code execution.",
-    )
+    run_timeout: float = Field(default=1800.0, description="Wallclock cap (s) on the claude process.")
     extra_args: list[str] = Field(default_factory=list, description="Extra flags appended to the claude argv.")
     extra_env: dict[str, str] = Field(default_factory=dict, description="Extra env for the claude process.")
 
@@ -99,23 +98,12 @@ class ClaudeCodeAgent(Agent):
 
     config_model = ClaudeCodeConfig
 
-    async def run(
-        self,
-        *,
-        sandbox: Sandbox,
-        messages: list[dict[str, Any]],
-        workdir: str | None = None,
-    ) -> AgentResult:
+    async def run(self, *, sandbox: Sandbox, messages: list[dict[str, Any]]) -> AgentResult:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
         base_url = cfg.model.base_url
         if not base_url:
             raise ValueError("claude_code: config.model.base_url is not set (the gateway/vLLM policy endpoint)")
-        user_messages = [message.get("content") for message in messages if message.get("role") == "user"]
-        if len(user_messages) != 1:
-            raise ValueError("claude_code requires exactly one 'user' message")
-        user_prompt = user_messages[0]
-        if not isinstance(user_prompt, str) or not user_prompt.strip():
-            raise ValueError("claude_code requires a non-empty user prompt")
+        system_prompt, problem = self._split_messages(messages)
 
         await self._ensure_claude(sandbox)
         # Let the agent's git commands trust the repo even if it's owned by another uid.
@@ -123,10 +111,10 @@ class ClaudeCodeAgent(Agent):
 
         # Point claude at the Anthropic endpoint (gateway session or vLLM) and run it.
         endpoint = _strip_v1(base_url)
-        argv = self._claude_argv(user_prompt)
+        argv = self._claude_argv(problem, system_prompt)
         env = self._claude_env(endpoint)
-        logger.info("claude_code: launch with user_prompt:\n%s", user_prompt)
-        proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=workdir)
+        logger.info("claude_code: launch (endpoint=%s)", endpoint)
+        proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout)
 
         out_tail = (proc.stdout or "").strip()[-2000:]
         err_tail = (proc.stderr or "").strip()[-2000:]
@@ -147,24 +135,8 @@ class ClaudeCodeAgent(Agent):
 
     # ----- helpers -----
     async def _ensure_claude(self, sandbox: Sandbox) -> None:
-        cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
-        probe_command = self._claude_probe_command()
-        if "/" in cfg.executable:
-            logger.info("claude_code: checking configured sidecar executable %s", cfg.executable)
-        if (await sandbox.exec_shell(probe_command)).exit_code == 0:
-            logger.info("claude_code: using preinstalled executable %s", cfg.executable)
+        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code == 0:
             return
-
-        # An explicit path is normally supplied by a mounted sidecar. Do not
-        # silently fall back to a network install when that mount is missing or
-        # has the wrong layout; fail with the path that needs fixing instead.
-        if "/" in cfg.executable:
-            logger.error(
-                "claude_code: sidecar executable is missing or not executable: %s; "
-                "refusing npm/native-install fallback",
-                cfg.executable,
-            )
-            raise RuntimeError(f"claude_code: configured executable is not executable: {cfg.executable}")
 
         has_npm = (await sandbox.exec_shell("command -v npm >/dev/null 2>&1")).exit_code == 0
         install_method = "npm" if has_npm else "native installer"
@@ -175,41 +147,40 @@ class ClaudeCodeAgent(Agent):
             detail = (result.stderr or result.stdout or "unknown error").strip()[-2000:]
             raise RuntimeError(f"claude_code: failed to install Claude Code with {install_method}: {detail}")
 
-        if (await sandbox.exec_shell(probe_command)).exit_code != 0:
+        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code != 0:
             raise RuntimeError("claude_code: installation finished but claude is not available on PATH")
         logger.info("claude_code: installation completed")
 
-    def _claude_probe_command(self) -> str:
-        cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
-        executable = shlex.quote(cfg.executable)
-        if "/" in cfg.executable:
-            return f"test -x {executable}"
-        return f"command -v {executable} >/dev/null 2>&1"
+    def _split_messages(self, messages: list[dict[str, Any]]) -> tuple[str | None, str]:
+        if len(messages) > 2:
+            raise ValueError(f"claude_code accepts at most 2 messages (system?, user), got {len(messages)}")
+        problem = next((m["content"] for m in messages if m.get("role") == "user"), None)
+        if not problem:
+            raise ValueError("claude_code requires a 'user' message (the problem statement)")
+        system = next((m["content"] for m in messages if m.get("role") == "system"), None)
+        return system, problem
 
-    def _claude_argv(self, user_prompt: str) -> list[str]:
+    def _claude_argv(self, problem: str, system_prompt: str | None) -> list[str]:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
         model = cfg.model.model_name
         if not model:
             raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
         argv = [
-            cfg.executable,
+            "claude",
             "-p",
-            user_prompt,
+            problem,
             "--model",
             model,
             "--permission-mode",
-            "bypassPermissions",
+            cfg.permission_mode,
         ]
-        if cfg.disable_slash_commands:
-            argv.append("--disable-slash-commands")
-        disallowed_tools = ["AskUserQuestion"]
-        if not cfg.enable_subagents:
-            disallowed_tools.extend(["Agent", "Task"])
-        if not cfg.enable_web_tools:
-            disallowed_tools.extend(["WebFetch", "WebSearch"])
-        argv += ["--disallowedTools", ",".join(disallowed_tools)]
+        if cfg.disallowed_tools:
+            argv += ["--disallowedTools", ",".join(cfg.disallowed_tools)]
         if cfg.max_turns is not None:
             argv += ["--max-turns", str(cfg.max_turns)]
+        if system_prompt:
+            # Append (don't replace) so Claude Code keeps its built-in tool/safety prompt.
+            argv += ["--append-system-prompt", system_prompt]
         if cfg.verbose:
             argv += ["--verbose"]
         return argv + list(cfg.extra_args)
@@ -219,30 +190,35 @@ class ClaudeCodeAgent(Agent):
         model = cfg.model.model_name
         if not model:
             raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
-        auth_token = cfg.model.api_key
-        if not auth_token or auth_token == "EMPTY":
-            auth_token = str(uuid.uuid4())
-        env = {
-            "IS_SANDBOX": "1",
+        configured_api_key = cfg.model.api_key
+        has_external_api_key = bool(configured_api_key and configured_api_key != "EMPTY")
+        return {
             "ANTHROPIC_BASE_URL": endpoint,
-            "ANTHROPIC_AUTH_TOKEN": auth_token,
+            # We always run inside a sandbox: allows unattended permission bypass
+            # while running as root and skips Claude Code's overload guard path.
+            "IS_SANDBOX": "1",
+            # External endpoints receive ModelConfig's Bearer key. The session Gateway
+            # ignores auth, but Claude Code still requires non-empty placeholder values.
+            "ANTHROPIC_API_KEY": "" if has_external_api_key else "sk-ant-uni-agent-placeholder",
+            "ANTHROPIC_AUTH_TOKEN": configured_api_key if has_external_api_key else str(uuid.uuid4()),
+            # Route every model slot to our single served model. Besides the main tiers,
+            # Claude Code fires *background*/subagent calls (summaries, sub-tasks) on the
+            # haiku + subagent slots. On direct vLLM leaving those unset 404s on a name it
+            # doesn't serve; the gateway ignores the model name, but pinning is harmless
+            # and keeps both paths identical, so pin them all to `model`.
             "ANTHROPIC_MODEL": model,
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
-            "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1",
-            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
-            "API_TIMEOUT_MS": "86400000",  # 24 hours
-            "CLAUDE_CODE_MAX_RETRIES": "0",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            # claude only needs to reach ANTHROPIC_BASE_URL (the gateway node, or a direct
+            # vLLM host); it's reachable directly, so strip the sandbox's injected egress proxy.
             "NO_PROXY": "*",
             "no_proxy": "*",
             "HTTP_PROXY": "",
             "http_proxy": "",
             "HTTPS_PROXY": "",
             "https_proxy": "",
+            **_CC_QUIET_ENV,
+            **cfg.extra_env,
         }
-        if cfg.enable_subagents:
-            env["CLAUDE_CODE_SUBAGENT_MODEL"] = model
-        env.update(cfg.extra_env)
-        return env

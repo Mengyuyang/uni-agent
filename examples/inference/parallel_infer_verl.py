@@ -21,18 +21,16 @@ Example (single node, 4-way tensor parallel)::
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path ~/models/Qwen3-Coder-30B-A3B-Instruct \
         --tool-parser qwen3_coder --tensor-parallel-size 4 \
-        --task-config examples/quickstart/inference/task_config_react.yaml --limit 8
+        --task-config examples/inference/task_config.yaml --limit 8
 
 ``--task-config`` is required (same YAML shape as ``parallel_infer_api.py``); the policy
 endpoint is the gateway session, bound by the runner, not a flag.
 """
 
 import argparse
-import importlib
 import json
 import logging
 import os
-import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -51,7 +49,6 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
-from uni_agent.runtime_env import pythonpath_with_resolved_package_roots
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -67,13 +64,6 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_P = 0.9
 DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
-_OPENYUANRONG_RUNTIME_ENV_KEYS = (
-    "OPENYUANRONG_SERVER_ADDRESS",
-    "OPENYUANRONG_TOKEN",
-    "OPENYUANRONG_TUNNEL_SSL_VERIFY",
-    "USE_OPENYUANRONG_SDK",
-    "SANDBOX_NAME_PREFIX",
-)
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -82,56 +72,6 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
         return ch * width
     pad = max(0, width - len(text) - 2)
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
-
-
-def _build_ray_runtime_env(engine: str) -> dict:
-    """Build the job-level environment inherited by every Ray actor.
-
-    This must be passed to the *first* ``ray.init``.  Adding the same values to
-    verl's config afterwards is too late: the standalone inference driver has
-    already joined Ray by then, so directly-created checkpoint actors inherit
-    the original job environment instead.
-    """
-    package_names = (
-        ("vllm", "verl", "uni_agent")
-        if engine == "vllm"
-        else ("sglang", "verl", "uni_agent")
-    )
-    env_vars = {
-        "PYTHONPATH": pythonpath_with_resolved_package_roots(
-            package_names,
-            os.getenv("PYTHONPATH"),
-        )
-    }
-    for key in _OPENYUANRONG_RUNTIME_ENV_KEYS:
-        if value := os.getenv(key):
-            env_vars[key] = value
-    return {"env_vars": env_vars}
-
-
-def _probe_worker_engine_import(engine: str) -> dict:
-    """Return import details from a Ray worker, failing early on a bad package."""
-    package_name = "vllm" if engine == "vllm" else "sglang"
-    module = importlib.import_module(package_name)
-    if engine == "vllm" and not hasattr(module, "LLM"):
-        raise ImportError(
-            "Ray worker resolved vllm without its LLM API: "
-            f"file={getattr(module, '__file__', None)!r}, "
-            f"path={list(getattr(module, '__path__', []))!r}, "
-            f"sys.path={sys.path!r}"
-        )
-    return {
-        "package": package_name,
-        "file": getattr(module, "__file__", None),
-        "path": list(getattr(module, "__path__", [])),
-    }
-
-
-def _validate_worker_engine_import(engine: str) -> None:
-    """Verify the engine import before starting the expensive worker group."""
-    probe = ray.remote(num_cpus=0)(_probe_worker_engine_import)
-    details = ray.get(probe.remote(engine))
-    logger.info("Ray worker engine import verified: %s", details)
 
 
 def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
@@ -174,8 +114,6 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     rollout.name = args.engine
     rollout.mode = "async"
-    # Standalone inference has no trainer to broadcast weights.
-    rollout.load_format = "auto"
     rollout.prompt_length = DEFAULT_PROMPT_LENGTH
     rollout.response_length = response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
@@ -183,8 +121,6 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.calculate_log_probs = True
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
-    rollout.free_cache_engine = False
-    OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -211,6 +147,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # TransferQueue carries the rollout trajectories (and their rm_scores).
     OmegaConf.update(config, "transfer_queue.enable", True, force_add=True)
+
     # Data.
     config.data.return_raw_chat = True
     config.data.max_prompt_length = DEFAULT_PROMPT_LENGTH
@@ -428,8 +365,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    ray.init(runtime_env=_build_ray_runtime_env(args.engine))
-    _validate_worker_engine_import(args.engine)
+    ray.init()
 
     resolver = TaskConfigResolver.from_file(args.task_config)
     served_model_name = args.served_model_name or os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))

@@ -5,9 +5,9 @@
 # sandbox-local reverse-tunnel port. run_task injects the per-session upstream
 # and rewrites agent.model.base_url to http://127.0.0.1:38197/... at runtime.
 #
-# The sidecar image below is the public recipe's historical default. Pin the
-# tag to the version validated by your OpenYuanrong environment before a full
-# run; the executable path must match the mounted image layout.
+# The sidecar image below is the public recipe's historical default. Its bin
+# directory is injected into the Sandbox PATH at creation time, so the existing
+# Claude Code agent discovers the preinstalled `claude` command normally.
 - name: swe_bench
   sandbox:
     provider: openyuanrong
@@ -16,13 +16,14 @@
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     sandbox_kwargs:
+      env:
+        PATH: /opt/claude-code/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       proxy_port: 38197
       mounts:
         - target: /opt/claude-code
           image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest
   agent:
     name: claude_code
-    executable: /opt/claude-code/bin/claude
     max_turns: 200
     run_timeout: 4800
     model:
@@ -47,13 +48,14 @@
       - from: "swerebench/sweb.eval.x86_64.**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
     sandbox_kwargs:
+      env:
+        PATH: /opt/claude-code/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       proxy_port: 38197
       mounts:
         - target: /opt/claude-code
           image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest
   agent:
     name: claude_code
-    executable: /opt/claude-code/bin/claude
     max_turns: 200
     run_timeout: 4800
     model:
