@@ -19,6 +19,7 @@ wire their overrides in (``_exec`` primitive, ``is_alive`` liveness probe, and t
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -212,6 +213,48 @@ def test_openyuanrong_recognizes_its_timeout():
     assert sb._is_timeout_error(RuntimeError("Command timed out after 60 seconds")) is True
     assert sb._is_timeout_error(TimeoutError()) is True
     assert sb._is_timeout_error(RuntimeError("other")) is False
+
+
+def test_openyuanrong_exec_merges_sandbox_and_command_environments():
+    from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
+
+    class _Commands:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def run(self, command, *, envs, cwd, timeout):
+            self.calls.append({"command": command, "envs": envs, "cwd": cwd, "timeout": timeout})
+            return SimpleNamespace(exit_code=0, stdout="ok", stderr="")
+
+    commands = _Commands()
+    sandbox = OpenyuanrongSandbox(
+        image="python:3.12",
+        env={"PATH": "/opt/claude-code/bin:/usr/bin", "SHARED": "sandbox"},
+    )
+    sandbox._sandbox = SimpleNamespace(commands=commands)
+
+    result = asyncio.run(
+        sandbox._exec(
+            ["claude", "--version"],
+            timeout=42,
+            workdir="/testbed",
+            env={"ANTHROPIC_BASE_URL": "http://gateway", "SHARED": "command"},
+        )
+    )
+
+    assert result == ExecResult(exit_code=0, stdout="ok", stderr="")
+    assert commands.calls == [
+        {
+            "command": "claude --version",
+            "envs": {
+                "PATH": "/opt/claude-code/bin:/usr/bin",
+                "SHARED": "command",
+                "ANTHROPIC_BASE_URL": "http://gateway",
+            },
+            "cwd": "/testbed",
+            "timeout": 42,
+        }
+    ]
 
 
 # --------------------------- provider is_alive() liveness ---------------------------

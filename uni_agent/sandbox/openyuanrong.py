@@ -261,8 +261,23 @@ class OpenyuanrongSandbox(Sandbox):
         """Run ``argv`` once via akernel ``Commands.run``."""
         sb = self._require()
         timeout_i = int(timeout) if timeout else 60
+        # The SDK accepts ``env`` when a Sandbox is created, but its one-shot
+        # Commands API does not inherit those values reliably.  Send the
+        # configured sandbox defaults again for every command, then let a
+        # command-specific environment (for example Claude's gateway settings)
+        # override individual keys.  In particular, this retains a sidecar's
+        # PATH while the agent supplies its own authentication variables.
+        command_env = dict(self.env or {})
+        if env:
+            command_env.update(env)
         # commands.run is a blocking SDK poll; run it off the event loop.
-        result = await asyncio.to_thread(sb.commands.run, shlex.join(argv), envs=env, cwd=workdir, timeout=timeout_i)
+        result = await asyncio.to_thread(
+            sb.commands.run,
+            shlex.join(argv),
+            envs=command_env or None,
+            cwd=workdir,
+            timeout=timeout_i,
+        )
         exit_code = int(result.exit_code)
         stdout = _to_str(getattr(result, "stdout", ""))
         stderr = _to_str(getattr(result, "stderr", ""))
