@@ -113,7 +113,7 @@ def test_ensure_claude_requires_binary_on_path_after_install():
         asyncio.run(_agent()._ensure_claude(sandbox))
 
 
-def test_run_uses_sandbox_default_workdir():
+def test_run_forwards_workdir():
     config = ClaudeCodeConfig(
         model=ModelConfig(
             base_url="https://ark.example/api/compatible",
@@ -127,12 +127,13 @@ def test_run_uses_sandbox_default_workdir():
         ClaudeCodeAgent(config).run(
             sandbox=sandbox,
             messages=[{"role": "user", "content": "fix the bug"}],
+            workdir="/testbed",
         )
     )
 
     assert result.finished is True
     assert len(sandbox.exec_calls) == 1
-    assert sandbox.exec_calls[0]["workdir"] is None
+    assert sandbox.exec_calls[0]["workdir"] == "/testbed"
     argv = sandbox.exec_calls[0]["argv"]
     assert argv[:2] == ["claude", "-p"]
     assert argv[argv.index("--model") + 1] == "policy"
