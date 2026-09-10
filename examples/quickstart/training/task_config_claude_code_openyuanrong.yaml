@@ -9,8 +9,8 @@
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     sandbox_kwargs:
-      env:
-        PATH: /opt/claude-code/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      add_to_path:
+        - /opt/claude-code/bin
       proxy_port: 38197
       mounts:
         - target: /opt/claude-code
@@ -41,8 +41,8 @@
       - from: "swerebench/sweb.eval.x86_64.**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
     sandbox_kwargs:
-      env:
-        PATH: /opt/claude-code/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      add_to_path:
+        - /opt/claude-code/bin
       proxy_port: 38197
       mounts:
         - target: /opt/claude-code
