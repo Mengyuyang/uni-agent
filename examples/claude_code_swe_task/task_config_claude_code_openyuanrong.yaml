@@ -1,0 +1,51 @@
+# Claude Code tasks running in an OpenYuanrong sandbox. The task image is
+# remapped to the internal registry and the prebuilt Claude Code sidecar is
+# mounted at /opt/claude-code. A generic startup command links its executable into
+# the task image's existing PATH without adding Claude-specific provider logic.
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    startup_commands:
+      - mkdir -p /usr/local/bin && ln -sfn /opt/claude-code/bin/claude /usr/local/bin/claude
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/claude-code
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:20260910
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+  prompt_template: &swe_claude_prompt
+    - role: user
+      content: |-
+        Read the following task description and resolve the issue in the current directory.
+
+        Task description:
+        {problem_statement}
+
+        Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate tests or checks. Do not modify tests or commit changes. When finished, briefly summarize what changed and how it was verified.
+
+- name: swe_rebench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    startup_commands:
+      - mkdir -p /usr/local/bin && ln -sfn /opt/claude-code/bin/claude /usr/local/bin/claude
+    image_map:
+      - from: "swerebench/sweb.eval.x86_64.**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/claude-code
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:20260910
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+  prompt_template: *swe_claude_prompt
