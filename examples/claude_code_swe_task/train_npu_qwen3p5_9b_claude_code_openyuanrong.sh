@@ -2,8 +2,7 @@
 # Single-node Ascend A3 GSPO recipe for Qwen3.5-9B Dense + Claude Code/OpenYuanrong.
 # Target topology: 1 node x 16 NPUs, split into 8 trainer NPUs and 8 rollout NPUs.
 # Start the Ray head first, then run this script on that node.
-# No-fla_npu compatibility version: do not force AscendC/fla_npu GDN.
-# Qwen3.5 Megatron stays in BSHD: remove_padding and dynamic_bsz are disabled.
+# Match the optimized mini-swe path: Ascend GDN, remove padding, and dynamic batches.
 
 set -euo pipefail
 
@@ -18,6 +17,7 @@ TEST_FILE="${TEST_FILE:-${RUNTIME_DIR}/datasets/uniagent_0901/swe_bench_verified
 RUNTIME_ENV="${RUNTIME_ENV:-/mnt/share/z00876269/code/newstruct/runtime_env_openyuanrong.yaml}"
 TASK_CONFIG="${TASK_CONFIG:-examples/claude_code_swe_task/task_config_claude_code_openyuanrong.yaml}"
 RAY_JOB_ADDRESS="${RAY_JOB_ADDRESS:-http://127.0.0.1:28268}"
+SANDBOX_NAME_PREFIX="${SANDBOX_NAME_PREFIX:-dbs-mini-swe-}"
 
 PROJECT_NAME="${PROJECT_NAME:-cc-yuanrong-qwen3p5-9b-gspo}"
 EXP_NAME="${EXP_NAME:-1node-qwen35-9b-gspo-$(date +%Y%m%d-%H%M)}"
@@ -43,8 +43,7 @@ export OMP_PROC_BIND="${OMP_PROC_BIND:-false}"
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE="${VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE:-1}"
 
 # -------- Qwen3.5 GDN backend --------
-# No fla_npu in this environment: do not force use_ascend_gdn/use_triton_gdn.
-# Let the same default GDN path used by the working recipe take effect.
+# Use the Ascend GDN implementation selected by the optimized mini-swe recipe.
 
 # Follow the mini-swe separate-async layout on one A3 node. Actor/ref use one
 # 8-NPU pool and vLLM uses a disjoint 8-NPU pool.
@@ -144,13 +143,15 @@ echo "TRAIN TP/PP/CP=${TRAIN_TP}/${TRAIN_PP}/${TRAIN_CP}, DP=$((TRAIN_NPUS / TRA
 echo "Trainer mode=separate_async, parameter_sync_step=${PARAMETER_SYNC_STEP}"
 echo "Algorithm: adv_estimator=${ADV_ESTIMATOR}, loss_mode=${LOSS_MODE}, clip=${CLIP_RATIO_LOW}/${CLIP_RATIO_HIGH}"
 echo "TASK_CONFIG=${TASK_CONFIG}"
+echo "SANDBOX_NAME_PREFIX=${SANDBOX_NAME_PREFIX}"
 echo "Ray job address=${RAY_JOB_ADDRESS}"
-echo "GDN backend: old/default path (no fla_npu forced)"
+echo "GDN backend: Ascend (Triton GDN disabled)"
 
 ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --working-dir "${REPO_ROOT}" \
-    -- env PYTHONPATH="${PYTHONPATH}" PYTHONUNBUFFERED=1 RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
+    -- env PYTHONPATH="${PYTHONPATH}" PYTHONUNBUFFERED=1 RAY_OVERRIDE_JOB_RUNTIME_ENV=1 SANDBOX_NAME_PREFIX="${SANDBOX_NAME_PREFIX}" \
     python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
+    "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_NAME_PREFIX=\"${SANDBOX_NAME_PREFIX}\"" \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=separate_async \
     trainer.v1.separate_async.num_warmup_batches="${NUM_WARMUP_BATCHES}" \
@@ -160,7 +161,7 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     trainer.device=npu \
     actor_rollout_ref.nccl_timeout=9600 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.model.use_remove_padding=False \
+    actor_rollout_ref.model.use_remove_padding=True \
     +actor_rollout_ref.model.override_config.model_config.max_position_embeddings="${MAX_MODEL_LEN}" \
     "data.train_files=['${TRAIN_FILE}']" \
     "data.val_files=['${TEST_FILE}']" \
@@ -190,7 +191,7 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     +actor_rollout_ref.rollout.enable_sleep_mode=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.calculate_log_probs=True \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}" \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${LOG_PROB_MAX_TOKEN_LEN}" \
     actor_rollout_ref.rollout.temperature=1.0 \
@@ -223,6 +224,9 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     +actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=true \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=true \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
+    algorithm.filter_groups.enable=True \
+    algorithm.filter_groups.metric=acc \
+    algorithm.filter_groups.max_inflight_gen_batches=1 \
     algorithm.use_kl_in_reward="${USE_KL_IN_REWARD}" \
     algorithm.kl_ctrl.kl_coef="${KL_COEF}" \
     algorithm.rollout_correction.bypass_mode="${BYPASS_MODE}" \
@@ -237,7 +241,7 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=False \
     actor_rollout_ref.actor.loss_agg_mode="${LOSS_AGG_MODE}" \
-    actor_rollout_ref.actor.use_dynamic_bsz=False \
+    actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${ACTOR_PPO_MAX_TOKEN_LEN}" \
@@ -259,8 +263,9 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size="${TRAIN_TP}" \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="${TRAIN_PP}" \
     actor_rollout_ref.actor.megatron.context_parallel_size="${TRAIN_CP}" \
-    actor_rollout_ref.actor.megatron.use_remove_padding=False \
-    actor_rollout_ref.actor.megatron.pad_bshd_to_minibatch_max=True \
+    actor_rollout_ref.actor.megatron.use_remove_padding=True \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True \
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto \
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True \
@@ -274,7 +279,7 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size="${TRAIN_TP}" \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size="${TRAIN_PP}" \
     actor_rollout_ref.ref.megatron.context_parallel_size="${TRAIN_CP}" \
-    actor_rollout_ref.ref.megatron.use_remove_padding=False \
+    actor_rollout_ref.ref.megatron.use_remove_padding=True \
     reward.reward_manager.name=dapo \
     reward.custom_reward_function.path=pkg://uni_agent.framework.task_runner \
     reward.custom_reward_function.name=score_from_runner_result \
