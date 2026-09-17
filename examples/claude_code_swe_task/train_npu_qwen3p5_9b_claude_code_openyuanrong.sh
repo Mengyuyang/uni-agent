@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Single-node Ascend A3 GSPO recipe for Qwen3.5-9B Dense + Claude Code/OpenYuanrong.
-# Target topology: 1 node x 16 NPUs.
+# Target topology: 1 node x 16 NPUs, split into 8 trainer NPUs and 8 rollout NPUs.
 # Start the Ray head first, then run this script on that node.
 # No-fla_npu compatibility version: do not force AscendC/fla_npu GDN.
 # Qwen3.5 Megatron stays in BSHD: remove_padding and dynamic_bsz are disabled.
@@ -46,9 +46,15 @@ export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE="${VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE:-1}"
 # No fla_npu in this environment: do not force use_ascend_gdn/use_triton_gdn.
 # Let the same default GDN path used by the working recipe take effect.
 
-# One A3 node: actor/ref and vLLM are colocated across 16 NPUs.
+# Follow the mini-swe separate-async layout on one A3 node. Actor/ref use one
+# 8-NPU pool and vLLM uses a disjoint 8-NPU pool.
 NNODES="${NNODES:-1}"
-NGPUS_PER_NODE="${NGPUS_PER_NODE:-16}"
+NGPUS_PER_NODE="${NGPUS_PER_NODE:-8}"
+ROLLOUT_NNODES="${ROLLOUT_NNODES:-1}"
+ROLLOUT_NGPUS_PER_NODE="${ROLLOUT_NGPUS_PER_NODE:-8}"
+PHYSICAL_NPUS="${PHYSICAL_NPUS:-16}"
+NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-1}"
+PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-1}"
 
 # 8 prompts x 8 responses = 64 trajectories per optimizer step.
 TRAIN_PROMPT_BSZ="${TRAIN_PROMPT_BSZ:-8}"
@@ -57,17 +63,16 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-8}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}"
 
-# Retain the tested 136K context envelope. Keep the initial per-replica vLLM
-# token budget conservative for single-node bring-up, then tune it upward after
-# memory usage is stable.
+# Retain the tested 136K context envelope. The dedicated TP8 rollout pool uses
+# the same per-engine token budget as the mini-swe recipe.
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-8000}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-128000}"
 MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-34000}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-${MAX_MODEL_LEN}}"
 
-# Dense model: TP(2) x PP(1) x CP(4) = 8-way model parallelism, giving DP=2
-# across 16 NPUs. There is no expert parallelism for Qwen3.5-9B Dense.
-ROLLOUT_TP="${ROLLOUT_TP:-2}"
+# Dense trainer: TP(2) x PP(1) x CP(4) consumes the 8-NPU trainer pool.
+# Rollout follows mini-swe and spans the complete, separate 8-NPU pool.
+ROLLOUT_TP="${ROLLOUT_TP:-${ROLLOUT_NGPUS_PER_NODE}}"
 TRAIN_TP="${TRAIN_TP:-2}"
 TRAIN_PP="${TRAIN_PP:-1}"
 TRAIN_CP="${TRAIN_CP:-4}"
@@ -79,7 +84,7 @@ SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "${MODEL_PATH}")}"
 TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"
 MASK_UNFINISHED_EPISODE="${MASK_UNFINISHED_EPISODE:-False}"
 TRAJECTORY_SELECTION="${TRAJECTORY_SELECTION:-longest}"
-ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.6}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.7}"
 
 # -------- GSPO algorithm settings --------
 # Match the mini-swe-agent recipe: GRPO advantage estimation with the GSPO
@@ -104,15 +109,25 @@ TEST_FREQ="${TEST_FREQ:-10}"
 
 ACTOR_PPO_MAX_TOKEN_LEN=$((MAX_MODEL_LEN / TRAIN_CP))
 LOG_PROB_MAX_TOKEN_LEN=$((MAX_MODEL_LEN / TRAIN_CP))
-TOTAL_NPUS=$((NNODES * NGPUS_PER_NODE))
+TRAIN_NPUS=$((NNODES * NGPUS_PER_NODE))
+ROLLOUT_NPUS=$((ROLLOUT_NNODES * ROLLOUT_NGPUS_PER_NODE))
+TOTAL_NPUS=$((TRAIN_NPUS + ROLLOUT_NPUS))
 TRAIN_MODEL_PARALLEL_SIZE=$((TRAIN_TP * TRAIN_PP * TRAIN_CP))
 
-if (( TOTAL_NPUS % TRAIN_MODEL_PARALLEL_SIZE != 0 )); then
-    echo "Total NPUs (${TOTAL_NPUS}) must be divisible by TP*PP*CP (${TRAIN_MODEL_PARALLEL_SIZE})" >&2
+if (( TOTAL_NPUS != PHYSICAL_NPUS )); then
+    echo "Trainer + rollout request ${TOTAL_NPUS} NPUs, but PHYSICAL_NPUS=${PHYSICAL_NPUS}" >&2
     exit 1
 fi
-if (( TOTAL_NPUS % ROLLOUT_TP != 0 )); then
-    echo "Total NPUs (${TOTAL_NPUS}) must be divisible by ROLLOUT_TP (${ROLLOUT_TP})" >&2
+if (( TRAIN_NPUS % TRAIN_MODEL_PARALLEL_SIZE != 0 )); then
+    echo "Trainer NPUs (${TRAIN_NPUS}) must be divisible by TP*PP*CP (${TRAIN_MODEL_PARALLEL_SIZE})" >&2
+    exit 1
+fi
+if (( ROLLOUT_NPUS % ROLLOUT_TP != 0 )); then
+    echo "Rollout NPUs (${ROLLOUT_NPUS}) must be divisible by ROLLOUT_TP (${ROLLOUT_TP})" >&2
+    exit 1
+fi
+if (( TRAIN_PROMPT_BSZ != PARAMETER_SYNC_STEP * PPO_MINI_BATCH_SIZE )); then
+    echo "TRAIN_PROMPT_BSZ must equal PARAMETER_SYNC_STEP * PPO_MINI_BATCH_SIZE for separate_async" >&2
     exit 1
 fi
 if [[ ! -r "${TASK_CONFIG}" ]]; then
@@ -122,10 +137,11 @@ fi
 
 echo "===== Single-node Qwen3.5-9B Dense training topology ====="
 echo "MODEL_PATH=${MODEL_PATH}"
-echo "NNODES=${NNODES}, NGPUS_PER_NODE=${NGPUS_PER_NODE}, total_npu=${TOTAL_NPUS}"
+echo "Resources: trainer=${NNODES}x${NGPUS_PER_NODE}, rollout=${ROLLOUT_NNODES}x${ROLLOUT_NGPUS_PER_NODE}, total_npu=${TOTAL_NPUS}"
 echo "TRAIN_PROMPT_BSZ=${TRAIN_PROMPT_BSZ}, N_RESP_PER_PROMPT=${N_RESP_PER_PROMPT}, trajectories_per_step=$((TRAIN_PROMPT_BSZ * N_RESP_PER_PROMPT))"
 echo "CONCURRENCY=${CONCURRENCY}, NUM_AGENT_WORKERS=${NUM_AGENT_WORKERS}, GATEWAY_COUNT=${GATEWAY_COUNT}"
-echo "TRAIN TP/PP/CP=${TRAIN_TP}/${TRAIN_PP}/${TRAIN_CP}, DP=$((TOTAL_NPUS / TRAIN_MODEL_PARALLEL_SIZE)), ROLLOUT_TP=${ROLLOUT_TP}"
+echo "TRAIN TP/PP/CP=${TRAIN_TP}/${TRAIN_PP}/${TRAIN_CP}, DP=$((TRAIN_NPUS / TRAIN_MODEL_PARALLEL_SIZE)), ROLLOUT_TP=${ROLLOUT_TP}"
+echo "Trainer mode=separate_async, parameter_sync_step=${PARAMETER_SYNC_STEP}"
 echo "Algorithm: adv_estimator=${ADV_ESTIMATOR}, loss_mode=${LOSS_MODE}, clip=${CLIP_RATIO_LOW}/${CLIP_RATIO_HIGH}"
 echo "TASK_CONFIG=${TASK_CONFIG}"
 echo "Ray job address=${RAY_JOB_ADDRESS}"
@@ -136,13 +152,13 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
     trainer.use_v1=True \
-    trainer.v1.trainer_mode=colocate_async \
-    trainer.v1.colocate_async.num_warmup_batches=1 \
+    trainer.v1.trainer_mode=separate_async \
+    trainer.v1.separate_async.num_warmup_batches="${NUM_WARMUP_BATCHES}" \
+    trainer.v1.separate_async.parameter_sync_step="${PARAMETER_SYNC_STEP}" \
     transfer_queue.enable=True \
     transfer_queue.metrics.enabled=True \
     trainer.device=npu \
     actor_rollout_ref.nccl_timeout=9600 \
-    actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.use_remove_padding=False \
     +actor_rollout_ref.model.override_config.model_config.max_position_embeddings="${MAX_MODEL_LEN}" \
@@ -162,6 +178,8 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     actor_rollout_ref.rollout.n="${N_RESP_PER_PROMPT}" \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
+    actor_rollout_ref.rollout.nnodes="${ROLLOUT_NNODES}" \
+    actor_rollout_ref.rollout.n_gpus_per_node="${ROLLOUT_NGPUS_PER_NODE}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TP}" \
     actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
     actor_rollout_ref.rollout.prompt_length="${MAX_PROMPT_LENGTH}" \
@@ -201,8 +219,9 @@ ray job submit --address="${RAY_JOB_ADDRESS}" --runtime-env "${RUNTIME_ENV}" --w
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.report_reward=True \
     ++actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode="${MASK_UNFINISHED_EPISODE}" \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"' \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode=align \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=true \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=false \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=true \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     algorithm.use_kl_in_reward="${USE_KL_IN_REWARD}" \
     algorithm.kl_ctrl.kl_coef="${KL_COEF}" \
