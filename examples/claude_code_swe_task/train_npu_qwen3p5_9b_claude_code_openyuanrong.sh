@@ -54,10 +54,12 @@ ROLLOUT_NNODES="${ROLLOUT_NNODES:-1}"
 ROLLOUT_NGPUS_PER_NODE="${ROLLOUT_NGPUS_PER_NODE:-8}"
 PHYSICAL_NPUS="${PHYSICAL_NPUS:-16}"
 NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-1}"
-PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-1}"
+PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-2}"
 
-# 8 prompts x 8 responses = 64 trajectories per optimizer step.
-TRAIN_PROMPT_BSZ="${TRAIN_PROMPT_BSZ:-8}"
+# The physical 16-NPU node is split into one 8-NPU trainer pool and one 8-NPU
+# TP8 rollout engine. Sixteen prompts keep the PPO mini-batch at the proven
+# eight-prompt size while producing 128 trajectories in two 64-session waves.
+TRAIN_PROMPT_BSZ="${TRAIN_PROMPT_BSZ:-16}"
 N_RESP_PER_PROMPT="${N_RESP_PER_PROMPT:-8}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-8}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
