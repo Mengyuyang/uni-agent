@@ -50,10 +50,6 @@ The Quickstart includes two ready-to-use configs:
         max_turns: 200
         run_timeout: 4800
         verbose: true
-        model:
-          temperature: 1.0
-          top_p: 0.95
-          max_total_tokens: 131072
     ```
 
 === "ReAct"
@@ -68,6 +64,7 @@ The Quickstart includes two ready-to-use configs:
         name: react
         max_steps: 100
         tools:
+          - name: str_replace_editor
           - name: stateful_shell
             command_timeout: 180
             env_vars:
@@ -75,15 +72,20 @@ The Quickstart includes two ready-to-use configs:
               PAGER: "cat"
               TQDM_DISABLE: "1"
               GIT_PAGER: "cat"
-          - name: str_replace_editor
           - name: submit
-        model:
+        sampling_params_override:
           temperature: 0.8
           top_p: 0.9
-          max_total_tokens: 65536
     ```
 
 Configure the sandbox provider and Agent limits in YAML. Do not hard-code the runtime endpoint there unless every run uses the same service: API mode injects it from `--base-url` and `--model`, while verl mode injects the session Gateway endpoint.
+
+For verl inference, `--temperature`, `--top-p`, and `--top-k` set the shared
+rollout and validation sampling defaults. To enable ReAct YAML overrides, also
+pass `--allowed-request-sampling-param-keys temperature top_p top_k`. Direct API
+inference sends the white-box overrides directly to the endpoint.
+See [Sampling configuration](../concepts/gateway-and-trajectories.md#sampling-configuration)
+for the precedence and allowlist semantics.
 
 !!! note "Claude Code network access"
     Claude Code runs inside the sandbox and calls the Anthropic Messages endpoint from there. The endpoint must therefore be resolvable and reachable **from inside the sandbox**.
@@ -125,6 +127,8 @@ For an authenticated endpoint, also set `API_KEY` or pass `--api-key`. The scrip
 
 Each rollout writes `<log_dir>/<log_id>/task.log`. Set `--log-dir` to a shared-storage path when Ray workers may run on different nodes.
 
+`parallel_infer_api.py` treats the dataset's top-level `prompt` as the authoritative source message list and binds it over any nested Task prompt. Without `prompt_template`, those messages are passed to the Agent unchanged. With `prompt_template`, the Task instead builds the Agent-facing messages from metadata.
+
 Useful controls:
 
 - `--concurrency`: maximum number of in-flight tasks across all workers; defaults to `GLOBAL_CONCURRENCY`.
@@ -141,7 +145,7 @@ This mode requires the standard `verl` inference environment, GPUs, Ray, and Tra
 verl LLMServerManager (vLLM or SGLang)
     -> AgentFrameworkRolloutAdapter
     -> Uni-Agent Gateway sessions
-    -> Task Runner and sandbox
+    -> Agent Runner and sandbox
     -> TransferQueue trajectories and rewards
 ```
 
@@ -174,6 +178,13 @@ Important controls:
 - `--log-dir`: runtime root for Framework logs, Task logs, and trajectory artifacts.
 
 Task/Agent/Tool events go to `task.log`; Framework events go to `framework.log`.
+
+In Framework-managed mode, `raw_prompt` always means the Agent-neutral dataset/source prompt. verl uses it for loader-time token-length checks when overlong-prompt filtering is enabled, makes it available when a configured RewardLoop or judge scoring path is used, and preserves it as TransferQueue metadata. Task-rendered messages may replace it on the Agent side but do not overwrite the source value used by verl. The Gateway captures the Agent's actual model requests to build the trajectory token tensors.
+
+Self-rendering Agents receive that source message unchanged and may apply their own template inside the Sandbox. Their final internal messages are not observable through the current Agent Runner, so Task-rendered messages and an Agent's final internal prompt are not necessarily identical. This is the intended path for the planned mini-swe-agent integration.
+
+!!! note "Current scope"
+    Runtime prompt templates accept string message content only; multimodal template rendering is deferred. Without a template, pre-rendered structured messages can pass through in `prompt`, although end-to-end image, video, or audio support still depends on the selected Agent, API adapter, and model processor. Templates do not change the sandbox working directory or environment.
 
 For a Ray cluster, you can submit your job via a pre-defined Runtime Environment, for example:
 
@@ -214,6 +225,13 @@ ray job submit --no-wait \
 
 ## Recipes
 
+### Codex (inference only)
+
+The [Codex SWE-bench recipe](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/codex_swe_task/README.md)
+runs the pinned native Codex CLI inside an OpenYuanRong sandbox through the
+session's Responses endpoint. Follow its sidecar build, Qwen3.5-9B catalog, data
+preparation and Ray setup steps to run a single-task inference check.
+
 ### Claude Code
 
 Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandbox and owns its interaction loop and tools. The following examples run it with `doubao-seed-2.1-pro` through an external API and with `qwen3.6-35b-a3b` through the verl rollout engine.
@@ -253,6 +271,8 @@ Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandb
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path Qwen/Qwen3.6-35B-A3B \
         --task-config examples/quickstart/inference/task_config_claude_code.yaml \
+        --temperature 1.0 --top-p 0.95 \
+        --response-length 131072 \
         --tool-parser qwen3_coder \
         --tensor-parallel-size 4 \
         --nnodes 8 \
@@ -266,7 +286,7 @@ Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandb
 
 ### ReAct Agent
 
-ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `stateful_shell`, `str_replace_editor`, and `submit` from `task_config_react.yaml`. The examples below run the same Agent with an external Doubao service and two verl-managed Qwen checkpoints.
+ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `str_replace_editor`, `stateful_shell`, and `submit` from `task_config_react.yaml`. The examples below run the same Agent with an external Doubao service and two verl-managed Qwen checkpoints.
 
 === "Qwen3-Coder-30B-A3B-Instruct"
 
@@ -278,6 +298,7 @@ ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `sta
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path Qwen/Qwen3-Coder-30B-A3B-Instruct \
         --task-config examples/quickstart/inference/task_config_react.yaml \
+        --allowed-request-sampling-param-keys temperature top_p top_k \
         --tool-parser qwen3_coder \
         --tensor-parallel-size 4 \
         --nnodes 8 \
@@ -300,6 +321,7 @@ ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `sta
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path Qwen/Qwen3.6-35B-A3B \
         --task-config examples/quickstart/inference/task_config_react.yaml \
+        --temperature 1.0 --top-p 0.95 \
         --tool-parser qwen3_coder \
         --tensor-parallel-size 4 \
         --nnodes 8 \
@@ -310,6 +332,9 @@ ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `sta
     ```
 
     !!! success "Result"
+        This command uses rollout sampling defaults and leaves the YAML sampling overrides
+        unpermitted. Set `agent.max_steps: 200` in the Task YAML to match the run below.
+
         ReAct with Qwen3.6-35B-A3B achieved a **72.6% resolve rate** on SWE-Bench Verified, with `max-turns` = 200, `temperature` = 1.0, `top-p` = 0.95.
 
 === "Doubao-Seed-2.1-Pro"

@@ -6,16 +6,17 @@ import base64
 import dataclasses
 import logging
 import os
+import re
 import shlex
 import tempfile
 import uuid
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .utils import (
     extract_dir_from_file,
@@ -25,6 +26,8 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_EXECUTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
 def _to_str(data: str | bytes | None) -> str:
@@ -44,6 +47,88 @@ class ExecResult:
     stderr: str
 
 
+def _name_tag(ref: str) -> tuple[str, str | None]:
+    slash, colon = ref.rfind("/"), ref.rfind(":")
+    return (ref[:colon], ref[colon + 1 :]) if colon > slash else (ref, None)
+
+
+def _capture(pattern: str, value: str) -> str | None:
+    """Captured ``**`` (``""`` if the pattern has none). ``None`` if no match."""
+    if "**" not in pattern:
+        return "" if value == pattern else None
+    left, right = pattern.split("**", 1)
+    if not value.startswith(left) or (right and not value.endswith(right)):
+        return None
+    return value[len(left) : len(value) - len(right) if right else None] or None
+
+
+class ImageMap(BaseModel):
+    """Glob ``from`` → ``to`` for ``image``. ``**`` captures; ``:latest`` also matches untagged."""
+
+    from_: str = Field(alias="from", min_length=1)
+    to: str = Field(min_length=1)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _check(self) -> ImageMap:
+        if self.from_.count("**") > 1 or self.to.count("**") > 1:
+            raise ValueError("image_map may contain at most one '**'")
+        if "**" in self.to and "**" not in self.from_:
+            raise ValueError("image_map to has ** but from has none")
+        return self
+
+    def _match(self, image: str, pattern: str) -> str | None:
+        src_name, src_tag = _name_tag(image)
+        pat_name, pat_tag = _name_tag(pattern)
+        mid = _capture(pat_name, src_name)
+        if mid is None or (pat_tag and (src_tag or "latest") != pat_tag):
+            return None
+        return mid
+
+    def try_map(self, image: str) -> str | None:
+        mid = self._match(image, self.from_)
+        if mid is None:
+            return None
+        to_name, to_tag = _name_tag(self.to)
+        _, src_tag = _name_tag(image)
+        name, tag = to_name.replace("**", mid, 1), to_tag or src_tag
+        return f"{name}:{tag}" if tag else name
+
+
+class ImageMount(BaseModel):
+    """A container image mounted as a directory inside a sandbox."""
+
+    image: str = Field(
+        min_length=1,
+        description="Container image whose root filesystem is mounted.",
+    )
+    mount_path: str = Field(
+        min_length=1,
+        description="Absolute non-root path where the image root filesystem is mounted.",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("image")
+    @classmethod
+    def _validate_image(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("mounted image must be a non-empty string")
+        return value.strip()
+
+    @field_validator("mount_path")
+    @classmethod
+    def _validate_mount_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if not path.is_absolute():
+            raise ValueError("image mount_path must be absolute")
+        if path == PurePosixPath("/"):
+            raise ValueError("image mount_path must not be '/'")
+        if ".." in path.parts:
+            raise ValueError("image mount_path must not contain '..'")
+        return str(path)
+
+
 class SandboxConfig(BaseModel):
     """Which provider to run, plus its construction kwargs.
 
@@ -56,15 +141,71 @@ class SandboxConfig(BaseModel):
     )
     runtime_timeout: float = Field(
         default=3600.0,
-        description="Max sandbox runtime/lifetime (seconds) before it is killed; used by remote providers.",
+        description="Max sandbox runtime/lifetime in seconds.",
     )
-    image: str = Field(default="python:3.12", description="Container image for remote providers (e.g. modal).")
+    image: str | None = Field(
+        default=None,
+        description="Container image for non-local providers",
+    )
+    image_map: list[ImageMap] = Field(
+        default_factory=list,
+        description="Optional glob from/to rules applied to image at construction. First match wins.",
+    )
+    image_mounts: list[ImageMount] = Field(
+        default_factory=list,
+        description="Container images mounted at provider-independent paths inside the sandbox.",
+    )
+    executable_paths: dict[str, str] = Field(
+        default_factory=dict,
+        description="Command names mapped to absolute executable paths exposed at /usr/bin.",
+    )
     sandbox_kwargs: dict[str, Any] = Field(
         default_factory=dict,
         description="Extra provider-specific kwargs forwarded to the sandbox constructor.",
     )
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("image_map", mode="before")
+    @classmethod
+    def _coerce_image_map(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            return [value]
+        return value
+
+    @model_validator(mode="after")
+    def _validate_image_mount_paths(self) -> SandboxConfig:
+        paths = [mount.mount_path for mount in self.image_mounts]
+        if len(paths) != len(set(paths)):
+            raise ValueError("image_mounts must use unique mount_path values")
+        return self
+
+    @field_validator("executable_paths")
+    @classmethod
+    def _validate_executable_paths(cls, value: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for name, raw_path in value.items():
+            if not _EXECUTABLE_NAME_RE.fullmatch(name):
+                raise ValueError(f"executable name {name!r} must be a simple command name")
+            path = PurePosixPath(raw_path)
+            if not path.is_absolute() or path == PurePosixPath("/") or ".." in path.parts:
+                raise ValueError(f"executable path for {name!r} must be a safe absolute path")
+            normalized[name] = str(path)
+        return normalized
+
+    @model_validator(mode="after")
+    def _apply_image_map(self) -> SandboxConfig:
+        if not self.image_map:
+            return self
+        if self.image is None:
+            raise ValueError("image_map requires a non-local provider with an image")
+        for rule in self.image_map:
+            if (mapped := rule.try_map(self.image)) is not None:
+                self.image = mapped
+                return self
+        return self
 
 
 @runtime_checkable
@@ -107,6 +248,7 @@ class SandboxBackend(Protocol):
 
 _DEFAULT_STARTUP_TIMEOUT = 600.0
 _DEFAULT_STARTUP_CONCURRENCY = 64
+_DEFAULT_STOP_TIMEOUT = 120.0
 # Per-process startup semaphores, created lazily per event loop so
 # each binds to the loop that uses it and is *shared* across concurrent start()s.
 _startup_semaphores: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
@@ -146,13 +288,59 @@ async def _startup_slot() -> AsyncIterator[None]:
         yield
 
 
+async def _stop_after_failed_start(sandbox: Sandbox) -> None:
+    """Best-effort ``stop()`` after a failed or cancelled ``start()``.
+
+    ``async with`` does not call ``__aexit__`` when ``__aenter__`` itself fails,
+    so this is the only teardown for a container ``start()`` already created.
+    Bounded by ``SANDBOX_STOP_TIMEOUT`` (``<=0`` disables): the caller keeps
+    waiting through cancellation, so a hung ``stop()`` would never let it exit.
+    """
+    timeout = _env_number("SANDBOX_STOP_TIMEOUT", _DEFAULT_STOP_TIMEOUT)
+    try:
+        await asyncio.wait_for(sandbox.stop(), timeout=timeout if timeout > 0 else None)
+    except asyncio.TimeoutError:
+        logger.warning("sandbox stop() exceeded SANDBOX_STOP_TIMEOUT=%gs during start() cleanup", timeout)
+    except Exception:
+        logger.warning("sandbox stop() failed during start() cleanup", exc_info=True)
+
+
+async def _stop_after_failed_start_shielded(sandbox: Sandbox) -> None:
+    """Finish ``stop()`` even when this task is cancelled again during teardown.
+
+    ``asyncio.shield`` keeps the cleanup task alive, but the outer await still
+    raises ``CancelledError``. Keep waiting until ``stop()`` finishes, then
+    propagate that cancellation.
+    """
+    stop_task = asyncio.create_task(_stop_after_failed_start(sandbox))
+    cancelled = False
+    while not stop_task.done():
+        try:
+            await asyncio.shield(stop_task)
+        except asyncio.CancelledError:
+            cancelled = True
+    if not cancelled:
+        await stop_task
+        return
+    try:
+        await stop_task
+    except asyncio.CancelledError:
+        pass
+    raise asyncio.CancelledError()
+
+
 class Sandbox(abc.ABC):
     """One provider = one class: owns lifecycle and is the data-plane backend.
 
-    Providers implement :meth:`start`, :meth:`stop` and the :meth:`_exec`
-    primitive; the public :meth:`exec` wraps ``_exec`` with a shared error
-    policy, and the ``bash -lc`` helper and exec-based file transfer build on
-    top. :meth:`expose_port` is optional (raises until a provider implements it).
+    Providers implement :meth:`start` and :meth:`stop`, plus either:
+
+    - :meth:`_exec` — the usual path; public :meth:`exec` wraps it with a shared
+      error policy, and :meth:`exec_shell` defaults to ``bash -c`` on top; or
+    - :meth:`exec` and :meth:`exec_shell` — override both when the backend has
+      its own command/shell semantics and should not use the base wrappers.
+
+    Exec-based file transfer builds on :meth:`exec` / :meth:`exec_shell`.
+    :meth:`expose_port` is optional (raises until a provider implements it).
     """
 
     #: Registry key for this provider, stamped by ``@register_sandbox``.
@@ -164,8 +352,8 @@ class Sandbox(abc.ABC):
     def from_config(cls, config: SandboxConfig) -> Sandbox:
         """Build an instance from a :class:`SandboxConfig`.
 
-        Default: construct with no args; providers that take constructor kwargs
-        override this to map them off ``config``.
+        Default: construct with no args; providers that consume standard or
+        provider-specific config fields override this method.
         """
         return cls()
 
@@ -195,6 +383,35 @@ class Sandbox(abc.ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support native shells")
 
+    async def _setup_executable_paths(self, executable_paths: dict[str, str]) -> None:
+        """Force configured executables into ``/usr/bin`` after startup and mounts."""
+        for name, source in executable_paths.items():
+            target = f"/usr/bin/{name}"
+            current = await self.exec_shell(f"command -v {shlex.quote(name)}")
+            current_path = current.stdout.strip() if current.exit_code == 0 else ""
+            targets = [] if source == target else [target]
+            if current_path.startswith("/") and current_path not in {source, target}:
+                logger.warning(
+                    "overriding sandbox executable %r at %s with %s",
+                    name,
+                    current_path,
+                    source,
+                )
+                targets.append(current_path)
+            for link_path in targets:
+                linked = await self.exec(["ln", "-sfn", source, link_path])
+                if linked.exit_code != 0:
+                    detail = linked.stderr.strip() or linked.stdout.strip()
+                    raise RuntimeError(f"failed to link executable {name!r} to {link_path!r}: {detail}")
+            resolved = await self.exec_shell(f"command -v {shlex.quote(name)}")
+            actual = resolved.stdout.strip()
+            if resolved.exit_code != 0 or not actual:
+                detail = resolved.stderr.strip() or "command not found"
+                raise RuntimeError(f"failed to resolve configured executable {name!r}: {detail}")
+            same_file = await self.exec(["test", actual, "-ef", source])
+            if same_file.exit_code != 0:
+                raise RuntimeError(f"executable {name!r} resolves to {actual!r}, not configured source {source!r}")
+
     async def _run_start(self) -> None:
         """Run :meth:`start`, bounding it by the ``SANDBOX_STARTUP_TIMEOUT`` env cap (``<=0`` disables)."""
         timeout = _env_number("SANDBOX_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
@@ -208,7 +425,9 @@ class Sandbox(abc.ABC):
 
         Each attempt holds one startup slot (``SANDBOX_STARTUP_CONCURRENCY``)
         and is bounded by ``SANDBOX_STARTUP_TIMEOUT``; the slot is released before the
-        retry backoff and the cleanup ``stop()``.
+        retry backoff and the cleanup ``stop()``. Cancellation is not retried:
+        ``CancelledError`` is a ``BaseException`` on Python 3.10+, and a cancelled
+        enter must still ``stop()`` or the partial sandbox leaks.
         """
         retry = max(1, retry)
         last_exc: BaseException | None = None
@@ -219,10 +438,14 @@ class Sandbox(abc.ABC):
                 return self
             except Exception as exc:
                 last_exc = exc
-                try:
-                    await self.stop()
-                except Exception:
-                    logger.warning("sandbox stop() failed during start() cleanup", exc_info=True)
+                await _stop_after_failed_start_shielded(self)
+            except BaseException:
+                # Not retried. async with skips __aexit__ when enter itself
+                # is cancelled, so stop() here is what releases a container
+                # start() already created. Shield it so a second cancel
+                # cannot abandon that teardown.
+                await _stop_after_failed_start_shielded(self)
+                raise
             logger.warning("sandbox failed to start (attempt %d/%d): %r", attempt, retry, last_exc)
             if attempt < retry:
                 await asyncio.sleep(2 * attempt)
@@ -299,8 +522,8 @@ class Sandbox(abc.ABC):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
-        """Convenience: run ``script`` through ``bash -lc``."""
-        return await self.exec(["bash", "-lc", script], timeout=timeout, workdir=workdir, env=env)
+        """Convenience: run ``script`` through a non-login ``bash -c`` shell."""
+        return await self.exec(["bash", "-c", script], timeout=timeout, workdir=workdir, env=env)
 
     async def expose_port(self, port: int) -> str:
         """Return a host-reachable URL/addr for an in-sandbox ``port``.

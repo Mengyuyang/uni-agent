@@ -1,3 +1,4 @@
+import copy
 import json
 
 import pytest
@@ -5,10 +6,95 @@ import pytest
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "limits", [{"max_tokens": 32}, {"max_completion_tokens": 32}, {"max_tokens": 32, "max_completion_tokens": 32}]
+)
+def test_openai_output_limit_alias_preserves_sampling_policy_and_inputs(limits):
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
+
+    payload = {"messages": [{"role": "user", "content": "hello"}], "temperature": 0.9, **limits}
+    before = copy.deepcopy(payload)
+    defaults = {"max_tokens": 16, "temperature": 0.5, "top_p": 0.8}
+    request = openai_to_internal(
+        payload,
+        base_sampling_params=defaults,
+        allowed_sampling_keys=frozenset({"max_tokens", "stop"}),
+    )
+
+    assert request["sampling_params"] == {"max_tokens": 32, "temperature": 0.5, "top_p": 0.8}
+    assert payload == before
+    assert defaults == {"max_tokens": 16, "temperature": 0.5, "top_p": 0.8}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.0, "32", None, [], {}])
+def test_openai_completion_token_limit_rejects_non_positive_integers(value):
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError, match="max_completion_tokens must be a positive integer"):
+        openai_to_internal(
+            {"messages": [{"role": "user", "content": "hello"}], "max_completion_tokens": value},
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("legacy_limit", [16, 0, -1, True, False, 32.0, "32", None])
+def test_openai_output_limit_alias_rejects_conflicting_or_invalid_legacy_limit(legacy_limit):
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError, match="must specify the same positive integer"):
+        openai_to_internal(
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": legacy_limit,
+                "max_completion_tokens": 32,
+            },
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("allowed", [frozenset(), frozenset({"max_completion_tokens"})])
+def test_openai_output_limit_alias_does_not_bypass_canonical_permission(allowed):
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
+
+    request = openai_to_internal(
+        {"messages": [{"role": "user", "content": "hello"}], "max_completion_tokens": 32},
+        base_sampling_params={"max_tokens": 16},
+        allowed_sampling_keys=allowed,
+    )
+    assert request["sampling_params"] == {"max_tokens": 16}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_openai_omitted_output_limit_preserves_session_default():
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
+
+    request = openai_to_internal(
+        {"messages": [{"role": "user", "content": "hello"}]},
+        base_sampling_params={"max_tokens": 16},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert request["sampling_params"] == {"max_tokens": 16}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_openai_build_response_shape():
     """A completed internal outcome serializes to the basic OpenAI chat
     completion envelope with ids, model, choices, and token usage."""
-    from uni_agent.gateway.adapters.openai import openai_build_response
+    from uni_agent.gateway.adapters.openai_chat import openai_build_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
     outcome = GenerationOutcome(
@@ -27,11 +113,44 @@ def test_openai_build_response_shape():
     assert body["model"] == "m"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_openai_build_response_serializes_internal_dict_tool_arguments():
+    from uni_agent.gateway.adapters.openai_chat import openai_build_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    assistant_msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "f", "arguments": {"a": 1}},
+            }
+        ],
+    }
+    outcome = GenerationOutcome(
+        assistant_msg=assistant_msg,
+        finish_reason="tool_calls",
+        prompt_tokens=3,
+        completion_tokens=2,
+    )
+
+    body = openai_build_response(outcome, model="m")
+    wire_arguments = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+
+    assert json.loads(wire_arguments) == {"a": 1}
+    assert assistant_msg["tool_calls"][0]["function"]["arguments"] == {"a": 1}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_openai_stream_response_emits_compatible_sse_chunks():
     """A completed internal outcome is synthesized into OpenAI-compatible SSE
     chunks for role, reasoning, content, tool calls, final usage, and DONE."""
-    from uni_agent.gateway.adapters.openai import openai_stream_response
+    from uni_agent.gateway.adapters.openai_chat import openai_stream_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
     resp = openai_stream_response(
@@ -44,7 +163,7 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "f", "arguments": '{"a":1}'},
+                        "function": {"name": "f", "arguments": {"a": 1}},
                     }
                 ],
             },
@@ -69,6 +188,8 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
     assert chunks[2]["choices"][0]["delta"] == {"content": "hello"}
     assert chunks[3]["choices"][0]["delta"]["tool_calls"][0]["index"] == 0
     assert chunks[3]["choices"][0]["delta"]["tool_calls"][0]["id"] == "call-1"
+    wire_arguments = chunks[3]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(wire_arguments) == {"a": 1}
     assert chunks[4]["choices"][0]["finish_reason"] == "tool_calls"
     assert chunks[4]["usage"] == {
         "prompt_tokens": 3,
@@ -77,11 +198,13 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
     }
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     """OpenAI wire requests lower to the internal shape: sampling params use the
-    gateway allowlist, JSON tool arguments are parsed, malformed argument
-    strings are preserved, and tool_choice=none clears tool schemas."""
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    gateway allowlist, JSON-object tool arguments are parsed, non-object and
+    malformed arguments stay strings, and tool_choice=none clears tool schemas."""
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
 
     payload = {
         "messages": [
@@ -91,6 +214,8 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
                 "tool_calls": [
                     {"id": "x", "type": "function", "function": {"name": "f", "arguments": '{"x": 1}'}},
                     {"id": "y", "type": "function", "function": {"name": "g", "arguments": "not json"}},
+                    {"id": "z", "type": "function", "function": {"name": "h", "arguments": "[1, 2]"}},
+                    {"id": "w", "type": "function", "function": {"name": "i", "arguments": [1, 2]}},
                 ],
             },
         ],
@@ -110,6 +235,8 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     assert req["messages"][0] == {"role": "user", "content": "hi"}
     assert req["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"x": 1}
     assert req["messages"][1]["tool_calls"][1]["function"]["arguments"] == "not json"
+    assert req["messages"][1]["tool_calls"][2]["function"]["arguments"] == "[1, 2]"
+    assert req["messages"][1]["tool_calls"][3]["function"]["arguments"] == "[1, 2]"
     assert req["tools"][0]["function"]["name"] == "f"
     assert req["sampling_params"]["max_tokens"] == 32
     assert req["sampling_params"]["temperature"] == 0.7

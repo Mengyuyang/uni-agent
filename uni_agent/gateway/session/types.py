@@ -1,4 +1,4 @@
-"""Shared gateway-owned types passed across session boundaries."""
+"""Shared types passed across Gateway and Agent Framework boundaries."""
 
 from __future__ import annotations
 
@@ -10,7 +10,31 @@ if TYPE_CHECKING:
     import torch
 
 
-class InternalGenerationRequest(TypedDict):
+class UnsupportedMediaError(ValueError):
+    """A request requires media capabilities unavailable in the current session."""
+
+
+class AgentContext(TypedDict):
+    """Harness identity within an outer Gateway session, independent of backend routing.
+
+    IDs are opaque and scoped by ``provider`` and the harness ``session_id``.
+    ``agent_id=None`` denotes the main agent; ``parent_agent_id=None`` means
+    no explicit parent was supplied, not necessarily that the parent is main.
+    """
+
+    provider: str
+    session_id: str
+    agent_id: str | None
+    parent_agent_id: str | None
+
+
+class _InternalGenerationRequestRequired(TypedDict):
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None
+    sampling_params: dict[str, Any]
+
+
+class InternalGenerationRequest(_InternalGenerationRequestRequired, total=False):
     """Lowered request consumed by GatewaySession.run_generation.
 
     Provider adapters lower OpenAI / Anthropic wire requests into this
@@ -18,9 +42,7 @@ class InternalGenerationRequest(TypedDict):
     provider-neutral block model.
     """
 
-    messages: list[dict[str, Any]]
-    tools: list[dict[str, Any]] | None
-    sampling_params: dict[str, Any]
+    agent_context: AgentContext
 
 
 @dataclass
@@ -31,14 +53,10 @@ class SessionHandle:
         session_id: Stable session identifier assigned by the caller.
         base_url: Per-session provider-compatible ``/v1`` API root, or ``None``
             when the handle only needs to identify the session.
-        reward_info_url: Per-session endpoint used by runners to attach reward
-            metadata; this is a sibling of the provider ``/v1`` root rather
-            than part of that API.
     """
 
     session_id: str
     base_url: str | None = None
-    reward_info_url: str | None = None
 
 
 @dataclass
@@ -53,23 +71,31 @@ class Trajectory:
             output and ``0`` marks interstitial context tokens.
         response_logprobs: Optional log probabilities aligned with
             ``response_ids``; continuation context tokens use ``0.0``.
-        reward_info: Reward metadata attached through the session reward-info
-            endpoint before finalization.
-        reward_score: Optional scalar reward assigned by downstream training.
+        finished: Tri-state episode completion fact attached by the
+            Agent Framework after the managed runner returns.
+        reward_score: Optional scalar reward assigned by the Agent Framework
+            from a managed Runner or RewardLoopWorker.
+        reward_metrics: Validation metrics and scorer metadata assigned by the
+            Agent Framework or RewardLoopWorker. VERL may also use string or
+            structured values as metadata; only values supported by downstream
+            aggregation are treated as numeric metrics.
         num_turns: Chat-turn count materialized with the trajectory.
         routed_experts: Optional expert-routing data captured by the backend.
         multi_modal_data: Optional image/video data associated with the prompt.
         extra_fields: Gateway-owned extension fields, such as trajectory
-            materialization metadata consumed by training adapters.
+            materialization metadata consumed by training adapters and the
+            ``min_global_steps``/``max_global_steps`` weight-version span.
     """
 
     prompt_ids: list[int]
     response_ids: list[int]
     response_mask: list[int]
     response_logprobs: list[float] | None = None
-    reward_info: dict[str, Any] = field(default_factory=dict)
+    finished: bool | None = None
     reward_score: float | None = None
+    reward_metrics: dict[str, Any] = field(default_factory=dict)
     num_turns: int = 0
+    chain_id: int | None = None
     routed_experts: torch.Tensor | np.ndarray | None = None
     multi_modal_data: dict[str, Any] | None = None
     extra_fields: dict[str, Any] = field(default_factory=dict)

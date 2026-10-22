@@ -33,7 +33,7 @@ Task dependencies provide task-specific datasets, verifiers, and reward implemen
 === "SWE-Bench"
 
     ```bash
-    pip install swebench
+    pip install swebench==4.1.0
     ```
 
 
@@ -55,6 +55,12 @@ Install the client package for the sandbox backend you plan to use, for example:
     pip install modal
     ```
 
+=== "E2B"
+
+    ```bash
+    pip install e2b
+    ```
+
 === "veFaaS"
 
     ```bash
@@ -72,7 +78,7 @@ pip:
   packages:
     - "volcengine-python-sdk"
     - "swe-rex"
-    - "swebench"
+    - "swebench==4.1.0"
 env_vars:
   PYTHONPATH: "verl"
   # ......

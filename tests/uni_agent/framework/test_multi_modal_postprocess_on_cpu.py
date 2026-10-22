@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from tests.uni_agent.support import FakeProcessor
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_compute_multi_modal_inputs_returns_empty_dict_without_processor():
     """Without a processor, multimodal postprocess is a no-op and returns an
     empty field map even when raw image data is present."""
@@ -15,6 +18,8 @@ def test_compute_multi_modal_inputs_returns_empty_dict_without_processor():
     assert compute_multi_modal_inputs(None, input_ids, {"images": ["image://a.png"]}) == {}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_compute_multi_modal_inputs_returns_image_tensors_and_images_seqlens():
     """Image inputs are converted through the processor while generated
     ``input_ids`` and ``attention_mask`` are stripped from the TQ payload."""
@@ -27,6 +32,7 @@ def test_compute_multi_modal_inputs_returns_image_tensors_and_images_seqlens():
         processor,
         input_ids,
         {"images": ["image://a.png"]},
+        {"max_pixels": 1024},
     )
 
     assert "input_ids" not in multi_modal_inputs
@@ -35,8 +41,11 @@ def test_compute_multi_modal_inputs_returns_image_tensors_and_images_seqlens():
     assert multi_modal_inputs["image_grid_thw"].tolist() == [[1, 2, 3]]
     assert multi_modal_inputs["images_seqlens"].tolist() == [6]
     assert "mm_token_type_ids" in multi_modal_inputs
+    assert processor.last_processor_call["extra_kwargs"] == {"max_pixels": 1024}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_compute_position_ids_uses_text_path_without_multimodal_inputs():
     """Text-only samples use VERL's mask-based path when a processor exists
     but this sample has no multimodal fields."""
@@ -52,6 +61,8 @@ def test_compute_position_ids_uses_text_path_without_multimodal_inputs():
     assert position_ids.tolist() == [[0, 0, 1, 2]]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_compute_position_ids_returns_multimodal_shape_with_processor():
     """With multimodal processor outputs, position ids combine the text row
     with the processor-provided vision RoPE rows."""

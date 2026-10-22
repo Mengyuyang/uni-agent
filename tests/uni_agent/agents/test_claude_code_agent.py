@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -50,15 +51,21 @@ def _agent() -> ClaudeCodeAgent:
     return ClaudeCodeAgent(ClaudeCodeConfig())
 
 
-def test_ensure_claude_skips_install_when_already_available():
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_ensure_claude_skips_install_when_already_available(caplog):
     sandbox = _FakeSandbox(probe_results=[0])
+    caplog.set_level(logging.INFO, logger="uni_agent.agents.claude_code.agent")
 
     asyncio.run(_agent()._ensure_claude(sandbox))
 
     assert len(sandbox.calls) == 1
     assert sandbox.calls[0]["script"].startswith("command -v claude")
+    assert "claude_code: found existing claude on PATH; skipping installation" in caplog.text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_installs_and_rechecks_path():
     sandbox = _FakeSandbox(probe_results=[1, 0])
 
@@ -73,6 +80,8 @@ def test_ensure_claude_installs_and_rechecks_path():
     assert sandbox.calls[2]["timeout"] == 600
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_uses_native_installer_when_npm_is_missing():
     sandbox = _FakeSandbox(probe_results=[1, 0], npm_available=False)
 
@@ -87,6 +96,8 @@ def test_ensure_claude_uses_native_installer_when_npm_is_missing():
     assert sandbox.calls[2]["timeout"] == 600
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_surfaces_install_failure():
     sandbox = _FakeSandbox(probe_results=[1], install_exit_code=1, install_stderr="npm failed")
 
@@ -94,6 +105,8 @@ def test_ensure_claude_surfaces_install_failure():
         asyncio.run(_agent()._ensure_claude(sandbox))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_surfaces_native_install_failure():
     sandbox = _FakeSandbox(
         probe_results=[1],
@@ -106,6 +119,8 @@ def test_ensure_claude_surfaces_native_install_failure():
         asyncio.run(_agent()._ensure_claude(sandbox))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_requires_binary_on_path_after_install():
     sandbox = _FakeSandbox(probe_results=[1, 1])
 
@@ -113,45 +128,204 @@ def test_ensure_claude_requires_binary_on_path_after_install():
         asyncio.run(_agent()._ensure_claude(sandbox))
 
 
-def test_run_uses_sandbox_default_workdir():
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "system_contents,expected_system_prompt",
+    [
+        ([], ""),
+        ([None], ""),
+        ([""], ""),
+        ([" \n"], ""),
+        (["  Follow the task rules.\n"], "  Follow the task rules.\n"),
+    ],
+)
+def test_run_forwards_workdir(system_contents, expected_system_prompt):
     config = ClaudeCodeConfig(
         model=ModelConfig(
             base_url="https://ark.example/api/compatible",
             api_key="ark-test-api-key",
             model_name="policy",
-        )
+        ),
+        run_timeout=123.0,
     )
     sandbox = _FakeSandbox(probe_results=[0])
 
     result = asyncio.run(
         ClaudeCodeAgent(config).run(
             sandbox=sandbox,
-            messages=[{"role": "user", "content": "fix the bug"}],
+            messages=[
+                *[{"role": "system", "content": content} for content in system_contents],
+                {"role": "user", "content": "fix the bug"},
+            ],
+            workdir="/testbed",
         )
     )
 
     assert result.finished is True
     assert len(sandbox.exec_calls) == 1
-    assert sandbox.exec_calls[0]["workdir"] is None
+    assert sandbox.exec_calls[0]["workdir"] == "/testbed"
+    assert sandbox.exec_calls[0]["timeout"] == 123.0
     argv = sandbox.exec_calls[0]["argv"]
     assert argv[:2] == ["claude", "-p"]
+    assert argv[2] == "fix the bug"
+    if expected_system_prompt:
+        assert argv.count("--system-prompt") == 1
+        assert argv[argv.index("--system-prompt") + 1] == expected_system_prompt
+    else:
+        assert "--system-prompt" not in argv
     assert argv[argv.index("--model") + 1] == "policy"
     assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--bare" not in argv
     assert "--no-session-persistence" not in argv
-    assert "--disable-slash-commands" not in argv
+    assert "--disable-slash-commands" in argv
+    assert "--append-system-prompt" not in argv
     assert "--dangerously-skip-permissions" not in argv
     disallowed_tools = argv[argv.index("--disallowedTools") + 1].split(",")
     assert set(disallowed_tools) == {"Agent", "Task", "WebFetch", "WebSearch", "AskUserQuestion"}
     assert sandbox.exec_calls[0]["env"]["ANTHROPIC_BASE_URL"] == "https://ark.example/api/compatible"
-    assert sandbox.exec_calls[0]["env"]["ANTHROPIC_API_KEY"] == ""
+    assert "ANTHROPIC_API_KEY" not in sandbox.exec_calls[0]["env"]
     assert sandbox.exec_calls[0]["env"]["ANTHROPIC_AUTH_TOKEN"] == "ark-test-api-key"
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
-    assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_FORK_SUBAGENT"] == "0"
+    assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] == "1"
+    assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] == "1"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("extra_args", [[], ["--system-prompt", "Explicit override"]])
+def test_run_accepts_user_only_message_without_rewriting(extra_args):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
+        extra_args=extra_args,
+    )
+    sandbox = _FakeSandbox(probe_results=[0])
+    prompt = (
+        "Inspect the repository in /testbed and resolve the following issue:\n\n"
+        "<issue_description>\nfix the bug\n</issue_description>\n\n"
+        "Run the relevant tests before finishing."
+    )
+
+    asyncio.run(
+        ClaudeCodeAgent(config).run(
+            sandbox=sandbox,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    )
+
+    assert sandbox.exec_calls[0]["argv"][2] == prompt
+    if extra_args:
+        assert sandbox.exec_calls[0]["argv"][-len(extra_args) :] == extra_args
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "messages,extra_args,error",
+    [
+        ([{"role": "system", "content": []}, {"role": "user", "content": "Fix"}], [], "text system messages"),
+        (
+            [{"role": "system", "content": "Rules"}, {"role": "user", "content": "Fix"}],
+            ["--system-prompt", "Other"],
+            "conflict",
+        ),
+        (
+            [{"role": "system", "content": "Rules"}, {"role": "user", "content": "Fix"}],
+            ["--system-prompt-file=rules.txt"],
+            "conflict",
+        ),
+        ([], [], "non-empty user prompt"),
+        ([{"role": "user"}], [], "non-empty user prompt"),
+        ([{"role": "user", "content": " \n"}], [], "non-empty user prompt"),
+        ([{"role": "user", "content": []}], [], "text user messages"),
+    ],
+)
+def test_run_rejects_invalid_prompt(messages, extra_args, error):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(base_url="http://gateway/v1", model_name="policy"), extra_args=extra_args
+    )
+    sandbox = _FakeSandbox(probe_results=[])
+    with pytest.raises(ValueError, match=error):
+        asyncio.run(ClaudeCodeAgent(config).run(sandbox=sandbox, messages=messages))
+    assert not sandbox.calls and not sandbox.exec_calls
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("role", ["user", "system"])
+@pytest.mark.parametrize("first_content", ["First", None])
+def test_run_rejects_duplicate_prompt_roles(role, first_content):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
+    )
+    sandbox = _FakeSandbox(probe_results=[])
+    messages = [{"role": role, "content": first_content}, {"role": role, "content": "Second"}]
+    if role == "system":
+        messages.insert(1, {"role": "user", "content": "Fix the bug"})
+
+    with pytest.raises(ValueError, match=f"at most one '{role}' message"):
+        asyncio.run(ClaudeCodeAgent(config).run(sandbox=sandbox, messages=messages))
+    assert not sandbox.calls and not sandbox.exec_calls
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("enable_web_tools", "enable_subagents", "expected_disallowed"),
+    [
+        (True, False, {"Agent", "Task", "AskUserQuestion"}),
+        (False, True, {"WebFetch", "WebSearch", "AskUserQuestion"}),
+        (True, True, {"AskUserQuestion"}),
+    ],
+)
+def test_claude_argv_controls_web_tools_and_subagents_independently(
+    enable_web_tools,
+    enable_subagents,
+    expected_disallowed,
+):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(model_name="policy"),
+        enable_web_tools=enable_web_tools,
+        enable_subagents=enable_subagents,
+    )
+
+    argv = ClaudeCodeAgent(config)._claude_argv("fix the bug")
+
+    disallowed_tools = argv[argv.index("--disallowedTools") + 1].split(",")
+    assert set(disallowed_tools) == expected_disallowed
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(("enable_subagents", "expected_model"), [(False, None), (True, "policy")])
+def test_claude_env_pins_enabled_subagents_to_policy_model(enable_subagents, expected_model):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(model_name="policy"),
+        enable_subagents=enable_subagents,
+    )
+
+    env = ClaudeCodeAgent(config)._claude_env("http://gateway:8000")
+
+    assert env.get("CLAUDE_CODE_SUBAGENT_MODEL") == expected_model
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_claude_argv_can_keep_slash_commands_enabled():
+    config = ClaudeCodeConfig(
+        model=ModelConfig(model_name="policy"),
+        disable_slash_commands=False,
+    )
+
+    argv = ClaudeCodeAgent(config)._claude_argv("fix the bug")
+
+    assert "--disable-slash-commands" not in argv
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_reports_nonzero_process_exit():
     config = ClaudeCodeConfig(
         model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
@@ -161,7 +335,10 @@ def test_run_reports_nonzero_process_exit():
     result = asyncio.run(
         ClaudeCodeAgent(config).run(
             sandbox=sandbox,
-            messages=[{"role": "user", "content": "fix the bug"}],
+            messages=[
+                {"role": "system", "content": "ignored system prompt"},
+                {"role": "user", "content": "fix the bug"},
+            ],
         )
     )
 
@@ -169,11 +346,13 @@ def test_run_reports_nonzero_process_exit():
     assert result.info["exit_code"] == 2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_claude_env_uses_placeholders_for_session_gateway():
     config = ClaudeCodeConfig(model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"))
 
     env = ClaudeCodeAgent(config)._claude_env("http://gateway:8000")
 
-    assert env["ANTHROPIC_API_KEY"] == "sk-ant-uni-agent-placeholder"
+    assert "ANTHROPIC_API_KEY" not in env
     assert env["ANTHROPIC_AUTH_TOKEN"]
     assert env["ANTHROPIC_AUTH_TOKEN"] != "EMPTY"

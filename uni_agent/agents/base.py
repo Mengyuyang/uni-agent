@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class ModelConfig(BaseModel):
-    """The OpenAI-compatible LLM endpoint the agent's policy talks to, plus sampling knobs."""
+    """The endpoint and model identity used by an Agent."""
 
     base_url: str | None = Field(
         default=None, description="Endpoint URL; the runner fills this in (in RL, the current policy server)."
@@ -23,49 +23,37 @@ class ModelConfig(BaseModel):
         default=None, description="Model name sent to the endpoint (the served model / policy)."
     )
 
-    # During RL, the Gateway session gets these defaults from the rollout config
-    temperature: float | None = Field(
-        default=None,
-        description="Sampling temperature; None inherits the endpoint/session default.",
-    )
-    top_p: float | None = Field(
-        default=None,
-        description="Nucleus-sampling probability mass; None inherits the endpoint/session default.",
-    )
-    top_k: int | None = Field(
-        default=None,
-        description="Top-k sampling; -1 disables it and None inherits the endpoint/session default.",
-    )
+    model_config = ConfigDict(extra="forbid")
 
-    # Generation budget: one turn's generation vs the whole episode's generation.
-    max_total_tokens: int | None = Field(
-        default=None,
-        description="Whole-episode generation budget (sum of completion tokens over all turns)",
-    )
-    max_tokens_per_turn: int | None = Field(
-        default=None,
-        description="Per-turn generation cap, sent as `max_tokens` on each chat-completions call.",
-    )
 
+class RequestSamplingConfig(BaseModel):
+    """Sampling controls for Agents that construct model requests themselves."""
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens_per_turn: int | None = None
     model_config = ConfigDict(extra="forbid")
 
     def sampling_params(self) -> dict[str, float | int]:
-        """Return only sampling knobs explicitly configured by this Agent."""
-        params = {
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,
+        """Return configured white-box sampling overrides."""
+        return {
+            key: value
+            for key, value in {
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "top_k": self.top_k,
+                "max_tokens": self.max_tokens_per_turn,
+            }.items()
+            if value is not None
         }
-        return {key: value for key, value in params.items() if value is not None}
 
 
 class AgentConfig(BaseModel):
     """Base config for a registered agent."""
 
     name: str = Field(default="", description="Registered agent name (key in AGENT_REGISTRY).")
-    model: ModelConfig = Field(
-        default_factory=ModelConfig, description="LLM endpoint + sampling params for the policy."
-    )
+    model: ModelConfig = Field(default_factory=ModelConfig, description="LLM endpoint and model identity.")
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -74,10 +62,12 @@ class AgentConfig(BaseModel):
 class AgentResult:
     """Artifacts one Agent produced for an episode.
 
-    ``finished`` is tri-state: ``True``/``False`` report a known completion
-    state, and ``None`` means the Agent does not track one. Agents that never
-    set it stay indistinguishable from Agents that finished normally, so
-    opting out never silently marks an episode untrainable.
+    Evaluation and reward annotations belong to the Task layer's ``TaskResult``,
+    not this Agent-layer result.
+
+    ``finished`` is tri-state: ``True``/``False`` report a known
+    completion state, and ``None`` means the Agent does not track one. Opting
+    out never silently marks an episode untrainable.
     """
 
     output: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -108,11 +98,13 @@ class Agent(ABC):
         *,
         sandbox: Sandbox,
         messages: list[dict[str, Any]],
+        workdir: str | None = None,
     ) -> AgentResult:
         """Solve the task described by ``messages`` inside the live ``sandbox``.
 
         ``sandbox`` is already started/provisioned (the task stops it afterwards);
         ``messages`` is the prompt in OpenAI chat form. Talks to the agent's own
-        :attr:`config.model` and returns the artifacts the task scores.
+        :attr:`config.model` and returns the artifacts the task scores. ``workdir``
+        optionally selects the Agent's working directory inside the Sandbox.
         """
         ...

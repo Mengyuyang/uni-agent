@@ -51,8 +51,12 @@ nav:
   - Quickstart:
       - Installation: quickstart/installation.md
       - Launch a Sandbox: quickstart/launch-sandbox.md
+      - Verify Oracle Solutions: quickstart/oracle-verification.md
       - Run Agent Inference: quickstart/agent-inference.md
+      - Run the Agent Aware Router: quickstart/agent-aware-router.md
+      - Harbor Integration: quickstart/harbor-integration.md
       - Run Agent RL Training: quickstart/rl-training.md
+      - Run Training on NPU: quickstart/npu-training.md
   - Concepts:
       - Overview: concepts/index.md
       - Sandbox: concepts/sandbox.md
@@ -60,6 +64,9 @@ nav:
       - Agent: concepts/agent.md
       - Task and Reward: concepts/task-and-reward.md
       - Gateway and Trajectories: concepts/gateway-and-trajectories.md
+      - Logging: concepts/logging.md
+      - RL-Insight Integration: concepts/rl-insight-integration.md
+      - Agent Aware Router: concepts/agent-aware-router.md
   - Benchmark:
       - Overview: benchmark/index.md
       - Inference and Verification: benchmark/inference.md
@@ -91,7 +98,7 @@ extra_javascript:
   - assets/js/runllm-widget.js
 
 extra_css:
-  - assets/stylesheets/extra.css?v=24
+  - assets/stylesheets/extra.css?v=31
 
 extra:
   social:

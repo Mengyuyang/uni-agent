@@ -21,10 +21,13 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
 === "Local"
 
-    **Local, non-isolated.** Commands run directly on the host.
+    **Host execution only; `local` is not a sandbox.** Commands run directly on the host.
 
-    !!! warning "Local execution can modify your machine"
-        Commands can read, modify, or delete local files and change the active Python environment. Use this backend only for small-scale validation with trusted commands.
+    !!! danger "Do not use `local` for sandboxed tasks"
+        Use `local` **only** for tasks that do not require a sandbox, such as HotpotQA.
+        Do not use it for tasks that require sandbox isolation: commands can read, modify,
+        or delete files on the host and change the active Python environment. To run a
+        sandbox locally, use the `Docker` backend instead.
 
     ```python
     from uni_agent.sandbox import SandboxConfig
@@ -44,20 +47,34 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     config = SandboxConfig(
         provider="docker",
         image="python:3.12",
+        runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={
             # "missing" (default), "always", or "never".
             "pull_policy": "missing",
             # Optional arguments inserted before the image in `docker run`.
             "run_args": ["--network", "none"],
+            # Optional seconds budget for pulling the image and for starting the container.
+            "pull_timeout": 900,
+            "start_timeout": 120,
         },
     )
     ```
 
     The provider starts an ephemeral container, executes commands with `docker exec`,
     transfers files with `docker cp`, and removes the container when the sandbox exits.
-    The default container command is `sleep infinity`; images without `sleep` can override
-    `entrypoint` and `command` in `sandbox_kwargs`. Run `docker login <registry>` first when
-    pulling from a private registry.
+    Before `docker run`, the provider applies `pull_policy` uniformly to the task image
+    and all mounted images. `pull_timeout` bounds each required `docker pull`, while
+    `start_timeout` bounds `docker run`; both default to 600 seconds. The whole startup
+    is also bounded by `SANDBOX_STARTUP_TIMEOUT` (600s by default).
+    The container entrypoint is fixed to `sleep`, with `runtime_timeout` passed as
+    its duration so the container exits at the configured lifetime. Task images must
+    therefore provide `sleep`. Docker image mounts require the containerd image store;
+    their source images are prepared according to `pull_policy` before `docker run`.
+    Run `docker login <registry>` first when pulling from a private registry.
 
 === "veFaaS"
 
@@ -128,19 +145,93 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         provider="modal",
         image="python:3.12",
         runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={"app_name": "agent-sandbox"},
     )
     ```
+
+    Modal builds each configured image and mounts it into the running
+    Sandbox with `Sandbox.mount_image`. Note that Modal SDK 1.3.4 or newer is required when using `image_mounts`.
+
+=== "E2B"
+
+    **Remote cloud service.** [E2B](https://e2b.dev/) starts Firecracker-based
+    sandboxes from pre-built templates.
+
+    Install the SDK and configure its API key:
+
+    ```bash
+    pip install "e2b>=2.26,<3"
+    export E2B_API_KEY="<e2b-api-key>"
+    ```
+
+    To use a template already provided by the service, pass its name or ID:
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="e2b",
+        runtime_timeout=3600,
+        sandbox_kwargs={
+            "template": "my-ready-template",
+            "allow_internet_access": True,
+            # Optional: proxy only E2B SDK traffic without setting a
+            # process-wide HTTP_PROXY in the training worker.
+            "proxy": "http://proxy.example:8080",
+        },
+    )
+    ```
+
+    Alternatively, pass an open-source image. The provider checks its
+    deterministic template name and builds the template when missing:
+
+    ```yaml
+    sandbox:
+      provider: e2b
+      image: python:3.12
+      sandbox_kwargs:
+        cpu_count: 4
+        memory_mb: 8192
+    ```
+
+    CPU and memory are part of the generated template name. Changing either
+    value builds and uses a separate template.
+
+    `sandbox_kwargs.proxy` is forwarded to E2B template operations, sandbox
+    creation, and subsequent SDK requests. It does not set proxy variables
+    inside the remote sandbox; use `sandbox_kwargs.envs` with `HTTP_PROXY` /
+    `HTTPS_PROXY` when commands running in the sandbox also need a proxy.
+
+    Commands and file operations run as `root` by default. Set
+    `sandbox_kwargs.user: null` to use the template's default user instead.
+
+    E2B does not provide OCI image mounts. Build a composite E2B template
+    when the task needs a separate runtime image; configuring `image_mounts`
+    is rejected explicitly. `executable_paths` remains available for binaries
+    already present in the selected image or template.
+
+    !!! warning "Gateway reachability"
+        Host-side agents such as ReAct only use E2B for tools. Agents launched
+        inside the sandbox, such as Claude Code, must be able to reach their
+        model endpoint from E2B. Use a routable HTTPS Gateway address and an
+        egress allowlist; a private worker address or `127.0.0.1` is not
+        reachable from the E2B cloud.
 
 === "OpenYuanrong"
 
     **Remote or self-hosted service.** [OpenYuanrong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.
 
+    Completed commands preserve their exit code, stdout, and stderr, including nonzero
+    exits. These are command results; SDK exceptions still use the shared sandbox error policy.
+
     Install the sandbox SDK:
 
     ```bash
-    pip install akernel_sdk
-    pip install openyuanrong_sdk
+    pip install openyuanrong-sandbox
     ```
 
     Configure the service endpoint and credentials through environment variables:
@@ -148,8 +239,8 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     ```bash
     export OPENYUANRONG_SERVER_ADDRESS="<server-address>"
     export OPENYUANRONG_TOKEN="<token>"
-    # Optional: toggle SSL verification on the reverse tunnel (default "0").
-    export OPENYUANRONG_TUNNEL_SSL_VERIFY="0"
+    # Optional: TLS for the frontend (default "1"). Set to "0" for plain HTTP.
+    export OPENYUANRONG_TLS="1"
     ```
 
     Configure the image, lifecycle timeout, and optional resource limits, mounts, and reverse tunnel:
@@ -161,14 +252,16 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         provider="openyuanrong",
         image="python:3.12",
         runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={
             "cpu": 1000,
             "memory": 2048,
             "cpu_limit": 4000,
             "mem_limit": 8192,
             "idle_timeout": 7200,
-            # Mount a image (e.g. a tool runtime) at a target path.
-            "mounts": [{"target": "/opt/tool", "image_url": "<image-url>"}],
             # Reverse tunnel: let the sandbox reach a local gateway via 127.0.0.1:<proxy_port>.
             "upstream": "<gateway-host>:<gateway-port>",
             "proxy_port": 38197,
@@ -177,6 +270,10 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         },
     )
     ```
+
+`image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
+agent harnesses to task sandboxes while keeping harness dependencies isolated
+from task images; `executable_paths` exposes selected runtime commands.
 
 ### Start and Stop the Sandbox
 
@@ -302,10 +399,17 @@ After configuring a supported backend above, run the complete connectivity and p
     DEBUG_MODE=1 SANDBOX_PROVIDER=modal python examples/quickstart/sandbox/demo.py
     ```
 
+=== "E2B"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 \
+      python examples/quickstart/sandbox/demo.py
+    ```
+
 === "OpenYuanrong"
 
     ```bash
     DEBUG_MODE=1 SANDBOX_PROVIDER=openyuanrong python examples/quickstart/sandbox/demo.py
     ```
 
-Next, you can [run agent inference](agent-inference.md) against a sandbox-backed task.
+Next, [verify task oracle solutions](oracle-verification.md) against the configured sandbox before running agent inference or training.

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import io
 import json
 import logging
 import os
 import random
+from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import Protocol
 from uuid import uuid4
 
 import numpy as np
@@ -22,6 +24,8 @@ from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from uni_agent.logging import LogContext, sample_logging
+from uni_agent.rl_insight.adapter import agent_loop_session
+from uni_agent.tasks import TaskResult
 from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
 from verl.utils.import_utils import load_class_from_fqn
@@ -34,17 +38,7 @@ from .multi_modal_postprocess import compute_multi_modal_inputs, compute_positio
 logger = logging.getLogger(__name__)
 
 
-class AgentRunner(Protocol):
-    """Callable contract for OpenAI-compatible agent runners."""
-
-    async def __call__(
-        self,
-        *,
-        session: SessionHandle,
-        raw_prompt: object,
-        sample_index: int,
-        **sample_runner_kwargs: object,
-    ) -> None: ...
+TrajectoryPostprocessor = Callable[..., list[Trajectory] | Awaitable[list[Trajectory]]]
 
 
 @dataclass
@@ -54,6 +48,7 @@ class _RunnerConfig:
     dispatch_mode: str
     max_concurrent_sessions: int
     trajectory_selection: str = "all"
+    session_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not self.runner_fqn:
@@ -64,6 +59,8 @@ class _RunnerConfig:
             raise ValueError(f"max_concurrent_sessions must be non-negative, got {self.max_concurrent_sessions}")
         if self.trajectory_selection not in {"all", "longest"}:
             raise ValueError(f"Unknown trajectory selection: {self.trajectory_selection}. Expected 'all' or 'longest'")
+        if self.session_timeout_seconds is not None and self.session_timeout_seconds <= 0:
+            raise ValueError(f"session_timeout_seconds must be positive, got {self.session_timeout_seconds}")
 
     @classmethod
     def from_config(cls, runner_name: object, runner_cfg) -> _RunnerConfig:
@@ -82,6 +79,8 @@ class _RunnerConfig:
         dispatch_mode = str(runner_cfg.get("dispatch_mode", "inline_async"))
         max_concurrent_sessions = int(runner_cfg.get("max_concurrent_sessions", 0) or 0)
         trajectory_selection = str(runner_cfg.get("trajectory_selection", "all"))
+        raw_timeout = runner_cfg.get("session_timeout_seconds")
+        session_timeout_seconds = None if raw_timeout is None else float(raw_timeout)
         try:
             return cls(
                 runner_fqn="" if runner_fqn is None else str(runner_fqn),
@@ -89,6 +88,7 @@ class _RunnerConfig:
                 dispatch_mode=dispatch_mode,
                 max_concurrent_sessions=max_concurrent_sessions,
                 trajectory_selection=trajectory_selection,
+                session_timeout_seconds=session_timeout_seconds,
             )
         except ValueError as exc:
             raise ValueError(f"agent_runners.{runner_name}: {exc}") from exc
@@ -119,11 +119,11 @@ def _run_agent_runner_ray_task(
     sample_index: int,
     tools_kwargs: object | None,
     log_context: LogContext | None,
-) -> None:
+) -> TaskResult | None:
     """Run only the user runner in Ray; parent owns session lifecycle outputs."""
     runner = _materialize_runner(runner_fqn, runner_kwargs)
     with _log_scope(log_context):
-        asyncio.run(
+        return asyncio.run(
             runner(
                 raw_prompt=raw_prompt,
                 session=session,
@@ -239,7 +239,26 @@ def _list_of_tq_fields_to_tensordict(fields: list[dict[str, object]]) -> TensorD
     return td
 
 
-def _trajectory_to_reward_dataproto(trajectory, sample_fields):
+def _attach_runner_reward_info(trajectories: list[Trajectory], task_result: TaskResult) -> list[Trajectory]:
+    """Preserve runner scoring context separately from final reward metrics."""
+    task_metrics = {} if task_result.accuracy is None else {"acc": task_result.accuracy}
+    return [
+        replace(
+            traj,
+            extra_fields={
+                **traj.extra_fields,
+                "runner_reward_info": {
+                    "reward": task_result.reward,
+                    "metrics": dict(task_metrics),
+                    "reward_context": dict(task_result.extra_info),
+                },
+            },
+        )
+        for traj in trajectories
+    ]
+
+
+def _trajectory_to_reward_dataproto(trajectory, sample_fields, task_result: TaskResult):
     """Build a single-sample DataProto for RewardLoopWorker.compute_score.
 
     Field shape matches AgentLoopWorker._compute_score
@@ -265,26 +284,47 @@ def _trajectory_to_reward_dataproto(trajectory, sample_fields):
     )
 
     non_tensor_batch: dict[str, object] = {}
-    for key in ("raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
+    for key in ("raw_prompt", "data_source", "tools_kwargs", "agent_name"):
         if key in sample_fields:
             non_tensor_batch[key] = np.array([sample_fields[key]], dtype=object)
+    non_tensor_batch["reward_model"] = np.array(
+        [sample_fields.get("reward_model", {"ground_truth": None})],
+        dtype=object,
+    )
+    non_tensor_batch["extra_info"] = np.array(
+        [
+            {
+                **dict(sample_fields.get("extra_info") or {}),
+                "runner_reward_info": {
+                    "reward": task_result.reward,
+                    "metrics": {} if task_result.accuracy is None else {"acc": task_result.accuracy},
+                    "reward_context": dict(task_result.extra_info),
+                },
+            }
+        ],
+        dtype=object,
+    )
     non_tensor_batch["__num_turns__"] = np.array([trajectory.num_turns])
 
     return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
 
-class OpenAICompatibleAgentFramework(AgentFramework):
-    """Reference AgentFramework implementation for OpenAI-compatible agent loops.
+class GatewayAgentFramework(AgentFramework):
+    """Reference AgentFramework implementation for Gateway-backed agent loops.
 
-    Each sample in the batch is run as an independent session: the agent
-    communicates with the Gateway via standard ``/v1/chat/completions``
-    requests, and the Gateway collects token-level trajectories.  After
-    finalization, scoring prefers the reward the runner posted to the session
-    (``_score_from_reward_info``); otherwise, if a RewardLoopWorker is configured,
-    ``_score_trajectories`` scores the final trajectory and broadcasts the score to all
-    trajectories in the session (matching ``AgentLoopWorkerTQ._agent_loop_postprocess``).
+    Each sample in the batch is run as an independent Gateway session: the agent
+    communicates through the Gateway's provider adapter (OpenAI Chat Completions
+    or Anthropic Messages), and the Gateway collects token-level trajectories. After
+    finalization, a configured custom scorer receives the managed runner's reward
+    information and owns the final score. Without a custom scorer, a non-None
+    runner reward is retained; a RewardLoopWorker is used when the runner omits it.
     The framework then writes them to the TransferQueue schema consumed by sync training.
     """
+
+    #: Grace period for a timed-out runner Ray task to observe a graceful
+    #: ray.cancel (letting its sandbox context manager tear down) before the
+    #: framework escalates to a force-kill.
+    _RUNNER_CANCEL_GRACE_SECONDS = 30.0
 
     def __init__(
         self,
@@ -292,27 +332,35 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         *,
         runner_registry: dict[str, _RunnerConfig],
         reward_loop_worker_handles=None,
+        custom_reward_function_configured: bool = False,
         processor=None,
         rollout_config=None,
         log_dir: str | None = None,
         mask_unfinished_episode: bool = False,
+        trajectory_postprocessor: TrajectoryPostprocessor | None = None,
+        trajectory_postprocessor_kwargs: dict[str, object] | None = None,
     ):
         self.gateway_manager = gateway_manager
         self.runner_registry = runner_registry
         # Materialize inline runners at construction since they run in-process and may maintain state;
-        # ray_task runners are materialized per-run since they run remotely.
+        # Ray-dispatched runners are materialized per-run since they run remotely.
         self._inline_runners = {
             runner_name: _materialize_runner(runner_config.runner_fqn, runner_config.runner_kwargs)
             for runner_name, runner_config in runner_registry.items()
             if runner_config.dispatch_mode == "inline_async"
         }
         self.reward_loop_worker_handles = list(reward_loop_worker_handles) if reward_loop_worker_handles else None
+        self._custom_reward_function_configured = custom_reward_function_configured
+        if self.reward_loop_worker_handles is None:
+            logger.info("No streaming reward worker handles; using the non-streaming reward path")
         self._processor = processor
         self._rollout_config = rollout_config
         self._runner_semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._log_dir = log_dir
         self._mask_unfinished_episode = mask_unfinished_episode
+        self._trajectory_postprocessor = trajectory_postprocessor
+        self._trajectory_postprocessor_kwargs = trajectory_postprocessor_kwargs or {}
 
     @classmethod
     def from_config(
@@ -322,9 +370,25 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         gateway_manager,
         processor=None,
         reward_loop_worker_handles=None,
-    ) -> OpenAICompatibleAgentFramework:
+    ) -> GatewayAgentFramework:
         # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
         af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
+        reward_model_enabled = OmegaConf.select(config, "reward.reward_model.enable", default=False)
+        reward_model_uses_separate_resources = OmegaConf.select(
+            config, "reward.reward_model.enable_resource_pool", default=True
+        )
+        custom_reward_function_path = OmegaConf.select(config, "reward.custom_reward_function.path", default=None)
+        if (
+            reward_model_enabled is True
+            and reward_model_uses_separate_resources is False
+            and custom_reward_function_path is not None
+        ):
+            logger.warning(
+                "Detected a custom reward function with a colocated reward model. The colocated reward path "
+                "does not receive AgentRunner TaskResult/runner_reward_info and replaces Runner-provided "
+                "rm_scores, so hybrid scoring such as model score plus task reward is not supported. Use "
+                "separate reward-model resources or a future VERL TransferQueue contract extension."
+            )
         runner_registry: dict[str, _RunnerConfig] = {}
         agent_runners_cfg = af_cfg.get("agent_runners")
         if not agent_runners_cfg:
@@ -339,22 +403,80 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         else:
             log_dir = os.environ.get("UNI_AGENT_LOG_DIR") or "/tmp/uni_agent_logs"
 
-        if not bool(af_cfg.get("use_reward_loop_worker", True)):
-            reward_loop_worker_handles = None
-
         mask_unfinished_episode = af_cfg.get("mask_unfinished_episode", False)
         if type(mask_unfinished_episode) is not bool:
             raise ValueError("actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode must be a bool")
+
+        postprocessor_fqn = af_cfg.get("trajectory_postprocessor_fqn")
+        postprocessor_kwargs = af_cfg.get("trajectory_postprocessor_kwargs")
+        if postprocessor_kwargs is None:
+            postprocessor_kwargs = {}
+        elif OmegaConf.is_config(postprocessor_kwargs):
+            postprocessor_kwargs = OmegaConf.to_container(postprocessor_kwargs, resolve=True)
+
+        trajectory_postprocessor = None
+        trajectory_postprocessor_kwargs = {}
+        if postprocessor_fqn is None:
+            if postprocessor_kwargs:
+                raise ValueError("trajectory_postprocessor_kwargs requires trajectory_postprocessor_fqn")
+        else:
+            if not isinstance(postprocessor_fqn, str) or not postprocessor_fqn.strip():
+                raise ValueError("trajectory_postprocessor_fqn must be a non-empty string")
+            if not isinstance(postprocessor_kwargs, dict):
+                raise TypeError("trajectory_postprocessor_kwargs must be a mapping")
+            postprocessor_fqn = postprocessor_fqn.strip()
+            trajectory_postprocessor = load_class_from_fqn(
+                postprocessor_fqn,
+                description="trajectory postprocessor",
+            )
+            if not callable(trajectory_postprocessor):
+                raise TypeError(f"Trajectory postprocessor {postprocessor_fqn!r} must resolve to a callable")
+            trajectory_postprocessor_kwargs = dict(postprocessor_kwargs)
 
         return cls(
             gateway_manager=gateway_manager,
             runner_registry=runner_registry,
             reward_loop_worker_handles=reward_loop_worker_handles,
+            custom_reward_function_configured=custom_reward_function_path is not None,
             processor=processor,
             rollout_config=config.actor_rollout_ref.rollout,
             log_dir=log_dir,
             mask_unfinished_episode=mask_unfinished_episode,
+            trajectory_postprocessor=trajectory_postprocessor,
+            trajectory_postprocessor_kwargs=trajectory_postprocessor_kwargs,
         )
+
+    async def _apply_trajectory_postprocessor(
+        self,
+        trajectories: list[Trajectory],
+        task_result: TaskResult,
+    ) -> list[Trajectory]:
+        """Apply the optional sync/async postprocessor and validate its result."""
+        expected_reward_fields = (
+            (
+                trajectories[-1].finished,
+                trajectories[-1].reward_score,
+                deepcopy(trajectories[-1].reward_metrics),
+            )
+            if trajectories
+            else (None, None, {})
+        )
+        result = self._trajectory_postprocessor(
+            tuple(trajectories), task_result=deepcopy(task_result), **self._trajectory_postprocessor_kwargs
+        )
+        if inspect.isawaitable(result):
+            result = await result
+
+        if not isinstance(result, list):
+            raise TypeError(f"trajectory postprocessor must return list[Trajectory], got {type(result).__name__}")
+        if any(not isinstance(trajectory, Trajectory) for trajectory in result):
+            raise TypeError("trajectory postprocessor returned a non-Trajectory item")
+        if any(
+            (trajectory.finished, trajectory.reward_score, trajectory.reward_metrics) != expected_reward_fields
+            for trajectory in result
+        ):
+            raise ValueError("trajectory postprocessor must preserve finalized reward fields")
+        return result
 
     def _build_session_sampling_params(
         self,
@@ -377,20 +499,21 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 top_p=config.val_kwargs.top_p,
                 top_k=config.val_kwargs.top_k,
             )
-        elif "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
+        # An explicit greedy flag overrides the partition sampling defaults.
+        if "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
         return sampling_params
 
     async def generate_sequences(self, prompts: TensorDict) -> None:
         """Run rollout-manager generation and write outputs into TransferQueue."""
         if self._rollout_config is None:
-            raise RuntimeError("OpenAICompatibleAgentFramework requires rollout_config for generate_sequences")
+            raise RuntimeError("GatewayAgentFramework requires rollout_config for generate_sequences")
 
         is_validate = bool(tu.get(prompts, "validate", False))
         partition_id = "val" if is_validate else "train"
         global_steps = tu.get(prompts, "global_steps")
         if global_steps is None and not is_validate:
-            raise ValueError("OpenAICompatibleAgentFramework requires prompts['global_steps'] for training")
+            raise ValueError("GatewayAgentFramework requires prompts['global_steps'] for training")
 
         if partition_id == "val":
             val_kwargs = self._rollout_config.get("val_kwargs", {})
@@ -400,9 +523,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
         uids = tu.get(prompts, "uid")
         if uids is None:
-            raise ValueError("OpenAICompatibleAgentFramework requires prompts['uid'] for TransferQueue output")
+            raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
 
-        stats = await self._run_batch_to_tq(
+        stats = await self._run_batch_rollouts(
             prompts,
             global_steps=global_steps,
             partition_id=partition_id,
@@ -427,7 +550,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             )
         return None
 
-    async def _run_batch_to_tq(
+    async def _run_batch_rollouts(
         self,
         prompts: TensorDict,
         *,
@@ -445,7 +568,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         tasks = []
         for sample_index in range(len(prompts)):
             tasks.append(
-                self._run_prompt_sessions_to_tq(
+                self._run_prompt_rollouts(
                     sample_fields=self._extract_sample_fields(prompts=prompts, sample_index=sample_index),
                     sample_index=sample_index,
                     global_steps=global_steps,
@@ -483,7 +606,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             failure_reasons.extend(outcome["failure_reasons"])
         return stats
 
-    async def _run_prompt_sessions_to_tq(
+    async def _run_prompt_rollouts(
         self,
         *,
         sample_fields: dict[str, object],
@@ -492,9 +615,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         partition_id: str,
         num_sessions: int,
     ) -> dict:
+        """Run ``rollout.n`` independent sessions for one prompt and persist their outputs."""
         uid = sample_fields.get("uid")
         if uid is None:
-            raise ValueError("OpenAICompatibleAgentFramework requires prompts['uid'] for TransferQueue output")
+            raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
         uid = str(uid)
         sampling_params = self._build_session_sampling_params(
             partition_id=partition_id,
@@ -503,8 +627,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
         # Prompt layer: rollout.n sessions race independently for the same uid.
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
+        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         tasks = [
-            self._run_session_with_concurrency_limit(
+            self._run_agent_episode_with_concurrency_limit(
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
@@ -554,7 +679,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 success_outputs += len(trajectories)
                 # One session is one episode; its trajectories all carry the same
                 # session-level completion flag, so this counts episodes, not tokens.
-                if any(traj.reward_info.get("finished") is False for traj in trajectories):
+                if any(traj.finished is False for traj in trajectories):
                     unfinished_episodes += 1
 
         if success_sessions > 0:
@@ -573,7 +698,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "failure_reasons": failure_reasons,
         }
 
-    async def _run_session_with_concurrency_limit(
+    async def _run_agent_episode_with_concurrency_limit(
         self,
         *,
         sample_fields: dict[str, object],
@@ -606,7 +731,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
         runner_cap = runner_config.max_concurrent_sessions
         if runner_cap <= 0:
-            return await self._run_session(
+            return await self._run_agent_episode(
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
@@ -622,7 +747,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             self._runner_semaphores[runner_name] = runner_semaphore
 
         async with runner_semaphore:
-            return await self._run_session(
+            return await self._run_agent_episode(
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
@@ -632,7 +757,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 sampling_params=sampling_params,
             )
 
-    async def _run_session(
+    async def _run_agent_episode(
         self,
         *,
         sample_fields: dict[str, object],
@@ -643,8 +768,17 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         runner_config: _RunnerConfig,
         sampling_params: dict[str, object],
     ) -> tuple[list[Trajectory], dict[str, object]]:
-        """Run one gateway session lifecycle and return finalized trajectories."""
+        """Run one AgentRunner episode inside a Framework-created Gateway session."""
         session_id = f"session-sample-{sample_index}-rollout-{session_index}-{uuid4().hex}"
+        uid = str(sample_fields.get("uid", ""))
+        session_trace = agent_loop_session(
+            sample=sample_index,
+            session=session_index,
+            uid=uid,
+            global_steps=global_steps,
+            session_id=session_id,
+        )
+        trace_identity = session_trace.identity
         if self._log_dir:
             log_root = Path(self._log_dir)
             run_dir = (log_root if global_steps is None else log_root / f"step_{int(global_steps)}") / session_id
@@ -659,9 +793,12 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
         raw_prompt = sample_fields["raw_prompt"]
         tools_kwargs = sample_fields.get("tools_kwargs")
+        tools_kwargs = dict(tools_kwargs or {})
+        tools_kwargs["_trace_identity"] = trace_identity
         async with _log_scope(parent_log):
             session = await self.gateway_manager.create_session(
                 session_id,
+                metadata={"_trace_identity": trace_identity},
                 sampling_params=dict(sampling_params),
             )
             logger.info(
@@ -685,14 +822,36 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                         tools_kwargs=tools_kwargs,
                         log_context=task_log,
                     )
-                    await object_ref
+                    # Guard against runners that hang without raising (e.g. a
+                    # remote sandbox that OOM-killed the kernel and never returns).
+                    # Without this cap a single stuck session would hold its
+                    # concurrency slot forever and stall the whole training batch.
+                    # wait_for only bounds the parent's await; the Ray task must
+                    # be cancelled explicitly or it (and its sandbox) would keep
+                    # running. Graceful cancel first so the runner's asyncio.run
+                    # unwinds and its sandbox context manager tears down cleanly;
+                    # force-kill only if it ignores the cancel.
+                    try:
+                        task_result = await asyncio.wait_for(
+                            object_ref,
+                            timeout=runner_config.session_timeout_seconds,
+                        )
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        await self._cancel_runner_task(object_ref, session_id)
+                        raise
                 else:
                     runner = self._inline_runners[runner_name]
-                    await runner(
+                    task_result = await runner(
                         raw_prompt=raw_prompt,
                         session=session,
                         sample_index=sample_index,
                         **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+                    )
+                if task_result is None:
+                    task_result = TaskResult()
+                elif not isinstance(task_result, TaskResult):
+                    raise TypeError(
+                        f"Agent runner {runner_name!r} must return TaskResult or None, got {type(task_result).__name__}"
                     )
                 session_trajectories = await self.gateway_manager.finalize_session(session_id)
                 session_trajectories = _select_session_trajectories(
@@ -700,40 +859,129 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                     session_trajectories,
                     runner_config.trajectory_selection,
                 )
+            except asyncio.CancelledError:
+                # Parent shutdown/cancellation must not leave the Gateway route
+                # and actor-owned session live after the runner task is gone.
+                try:
+                    await asyncio.shield(self.gateway_manager.abort_session(session_id))
+                except Exception:
+                    logger.exception("session %s: Gateway abort failed during parent cancellation", session_id)
+                raise
             except Exception:
                 logger.exception("session %s failed (runner=%s); aborting session", session_id, runner_name)
                 await self.gateway_manager.abort_session(session_id)
+                session_trace.finish(
+                    runner_name=runner_name,
+                    status="failure",
+                    trajectories=[],
+                )
                 raise
 
+            # Make the Runner's canonical result visible to postprocessors before
+            # they filter or reorder trajectories.  These fields are the
+            # Framework-owned trajectory representation of the session result;
+            # scorer metadata remains a separate Worker output channel.
+            task_metrics = {} if task_result.accuracy is None else {"acc": task_result.accuracy}
+            if session_trajectories:
+                session_trajectories = [
+                    replace(
+                        trajectory,
+                        finished=task_result.finished,
+                        reward_score=task_result.reward,
+                        reward_metrics=dict(task_metrics),
+                    )
+                    for trajectory in session_trajectories
+                ]
+
+            if self._trajectory_postprocessor is not None:
+                session_trajectories = await self._apply_trajectory_postprocessor(session_trajectories, task_result)
+
             if not session_trajectories:
+                session_trace.finish(
+                    runner_name=runner_name,
+                    status="empty",
+                    trajectories=[],
+                )
                 return session_trajectories, sample_fields
 
-            # Prefer the reward the runner posted to the session (report_reward=True);
-            # otherwise defer to the RewardLoopWorker (if any), else rm_scores stays 0.
-            annotations = self._score_from_reward_info(session_trajectories)
-            reward_source = "reward_info" if annotations is not None else None
-            if annotations is None and self.reward_loop_worker_handles:
-                annotations = await self._score_trajectories(session_trajectories, sample_fields)
+            if self.reward_loop_worker_handles and self._custom_reward_function_configured:
+                annotations = await self._score_trajectories(
+                    session_trajectories,
+                    sample_fields,
+                    task_result,
+                )
                 reward_source = "reward_loop_worker"
+            elif task_result.reward is not None:
+                annotations = [(float(task_result.reward), {}) for _ in session_trajectories]
+                reward_source = "agent_runner"
+            elif self.reward_loop_worker_handles:
+                annotations = await self._score_trajectories(session_trajectories, sample_fields, task_result)
+                reward_source = "reward_loop_worker"
+            else:
+                annotations = None
+                reward_source = None
 
             if annotations is None:
-                logger.warning("session %s: no reward available; rm_scores=0 for this sample", session_id)
+                logger.info("session %s: Framework produced no reward; rm_scores remain zero", session_id)
                 result_trajectories = session_trajectories
             else:
                 logger.info("session %s: scored via %s", session_id, reward_source)
                 result_trajectories = [
                     replace(
                         traj,
+                        finished=task_result.finished,
                         reward_score=score,
-                        extra_fields={**traj.extra_fields, "reward_extra_info": extra},
+                        reward_metrics=extra if reward_source == "reward_loop_worker" else dict(task_metrics),
                     )
                     for traj, (score, extra) in zip(session_trajectories, annotations, strict=True)
                 ]
 
+            result_trajectories = _attach_runner_reward_info(result_trajectories, task_result)
+
             self._log_trajectory_summary(session_id, result_trajectories)
             if run_dir is not None:
                 await asyncio.to_thread(self._dump_trajectories, run_dir, session_id, result_trajectories)
+            session_trace.finish(
+                runner_name=runner_name,
+                status="success",
+                trajectories=result_trajectories,
+                reward_source=reward_source,
+                finished=result_trajectories[0].finished if result_trajectories else None,
+            )
             return result_trajectories, sample_fields
+
+    async def _cancel_runner_task(self, object_ref, session_id: str) -> None:
+        """Cancel a dispatched runner Ray task after its session timed out.
+
+        Graceful cancel (``force=False``) lets the worker's ``asyncio.run`` raise
+        ``CancelledError`` and unwind, so runner-side cleanup (e.g. the task's
+        sandbox context manager) runs. If the task is still pending after a short
+        grace period, force-kill it: correctness of the batch (freeing the worker
+        and its resources) beats the risk of skipping graceful teardown.
+        """
+        try:
+            ray.cancel(object_ref)
+        except Exception:
+            logger.exception("session %s: ray.cancel failed for runner task", session_id)
+            return
+        try:
+            await asyncio.wait_for(object_ref, timeout=self._RUNNER_CANCEL_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "session %s: runner task ignored graceful cancel after %ss; force-killing",
+                session_id,
+                self._RUNNER_CANCEL_GRACE_SECONDS,
+            )
+            try:
+                ray.cancel(object_ref, force=True)
+            except Exception:
+                logger.exception("session %s: force ray.cancel failed", session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Task terminated while being cancelled (e.g. TaskCancelledError);
+            # that is the expected outcome.
+            pass
 
     def _log_trajectory_summary(self, session_id: str, trajectories: list[Trajectory]) -> None:
         """Log a per-session trajectory summary -- the info the task layer can't emit,
@@ -741,17 +989,24 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         lines = [f"session {session_id}: {len(trajectories)} trajectory(ies)"]
         for i, traj in enumerate(trajectories):
             model_tokens = sum(traj.response_mask) if traj.response_mask else 0
-            finished = traj.reward_info.get("finished")
-            reason = (traj.extra_fields or {}).get("materialization_reason")
+            finished = traj.finished
+            extra = traj.extra_fields or {}
+            reason = extra.get("materialization_reason")
             lines.append(
                 f"  [{i}] turns={traj.num_turns} prompt_tokens={len(traj.prompt_ids)} "
                 f"response_tokens={len(traj.response_ids)} model_tokens={model_tokens} "
                 f"finished={finished} "
                 f"logprobs={'yes' if traj.response_logprobs else 'no'} "
                 f"experts={'yes' if traj.routed_experts is not None else 'no'} "
-                f"reward_score={traj.reward_score} reward_info={traj.reward_info or {}}"
+                f"reward_score={traj.reward_score} reward_metrics={traj.reward_metrics}"
                 + (f" materialization_reason={reason}" if reason else "")
             )
+            if extra.get("num_coalesced_requests") or extra.get("rollback_count"):
+                lines[-1] += (
+                    f" coalesced_waiters={extra.get('num_coalesced_requests', 0)}"
+                    f" rollback_count={extra.get('rollback_count', 0)}"
+                    f" rollback_dropped_trainable_tokens={extra.get('rollback_dropped_trainable_tokens_total', 0)}"
+                )
         logger.info("\n".join(lines))
 
     def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
@@ -796,10 +1051,12 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         extra = traj.extra_fields or {}
         return {
             "num_turns": traj.num_turns,
-            "finished": traj.reward_info.get("finished"),
+            "finished": traj.finished,
             "reward_score": traj.reward_score,
-            "reward_info": traj.reward_info or {},
-            "reward_extra_info": extra.get("reward_extra_info"),
+            "reward_metrics": dict(traj.reward_metrics),
+            "num_coalesced_requests": extra.get("num_coalesced_requests"),
+            "rollback_count": extra.get("rollback_count"),
+            "rollback_dropped_trainable_tokens_total": extra.get("rollback_dropped_trainable_tokens_total"),
             "materialization_reason": extra.get("materialization_reason"),
             "prompt_len": len(traj.prompt_ids),
             "response_len": len(traj.response_ids),
@@ -808,54 +1065,27 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "has_logprobs": traj.response_logprobs is not None,
         }
 
-    def _score_from_reward_info(
-        self, session_trajectories: list[Trajectory]
-    ) -> list[tuple[float, dict[str, object]]] | None:
-        """Score from the reward the runner posted to the session, if any.
-
-        reward_score = the posted ``reward``. Older blackbox runners posted
-        ``reward_score`` instead; accept that alias so existing recipes do not
-        silently fall back to zero-reward trajectories. Anything else posted
-        (e.g. ``acc``) rides along as reward_extra_info. ``finished`` is dropped
-        instead: the framework consumes it directly as a completion fact, so it is
-        not a reward metric. See ``task_runner._post_reward_info`` for what's
-        posted.
-        """
-        reward_info = dict(session_trajectories[-1].reward_info or {})
-        reward = reward_info.pop("reward", None)
-        reward_info.pop("finished", None)
-        if reward is None:
-            reward = reward_info.pop("reward_score", None)
-        if reward is None:
-            return None
-        # Each trajectory needs its own dict: downstream code merges into it.
-        return [(float(reward), dict(reward_info)) for _ in session_trajectories]
-
     async def _score_trajectories(
         self,
         session_trajectories: list[Trajectory],
         sample_fields: dict[str, object],
+        task_result: TaskResult,
     ) -> list[tuple[float, dict[str, object]]]:
         """Score the session's final trajectory and broadcast (score, extra_info) to all.
 
         Mirrors AgentLoopWorkerTQ._agent_loop_postprocess
         (verl/trainer/main_ppo_sync.py:353-396): only the final trajectory (the
-        session's last interaction segment) is dispatched to RewardLoopWorker;
-        its score + reward_extra_info are then broadcast to every trajectory in
-        the session. Subclasses can override this method to implement custom
-        session-to-trajectory scoring policies.
+        session's last interaction segment) is dispatched to RewardLoopWorker.
+        The runner payload is available under ``extra_info.runner_reward_info``;
+        the Worker's score + reward_extra_info are then broadcast to every
+        trajectory in the session. Subclasses can override this method to
+        implement custom session-to-trajectory scoring policies.
         """
         assert self.reward_loop_worker_handles is not None
         assert session_trajectories, "expected non-empty session_trajectories"
 
         final_trajectory = session_trajectories[-1]
-        scoring_sample_fields = dict(sample_fields)
-        if final_trajectory.reward_info:
-            scoring_sample_fields["extra_info"] = {
-                **dict(sample_fields.get("extra_info") or {}),
-                **final_trajectory.reward_info,
-            }
-        data = _trajectory_to_reward_dataproto(final_trajectory, scoring_sample_fields)
+        data = _trajectory_to_reward_dataproto(final_trajectory, sample_fields, task_result)
         worker = random.choice(self.reward_loop_worker_handles)
         result = await worker.compute_score.remote(data)
 
@@ -864,7 +1094,18 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 f"RewardLoopWorker result missing 'reward_score' key or invalid for uid={sample_fields.get('uid')}"
             )
         score = float(result["reward_score"])
-        extra = result.get("reward_extra_info") or {}
+        if not np.isfinite(score):
+            raise ValueError("RewardLoopWorker reward_score must be finite")
+        extra = result.get("reward_extra_info")
+        if extra is None:
+            extra = {}
+        if not isinstance(extra, dict):
+            raise ValueError("RewardLoopWorker reward_extra_info must be a dict")
+        for key in extra:
+            if not isinstance(key, str):
+                raise ValueError("RewardLoopWorker reward_extra_info keys must be strings")
+            if key == "reward":
+                raise ValueError("RewardLoopWorker reward_extra_info key 'reward' is reserved")
         # Each trajectory needs its own dict: downstream code merges into it.
         return [(score, dict(extra)) for _ in session_trajectories]
 
@@ -924,9 +1165,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         prompts = torch.tensor(trajectory.prompt_ids, dtype=torch.long)
         responses = torch.tensor(trajectory.response_ids, dtype=torch.long)
         source_response_mask = torch.tensor(trajectory.response_mask, dtype=torch.long)
-        finished = trajectory.reward_info.get("finished")
+        finished = trajectory.finished
         if finished is not None and type(finished) is not bool:
-            raise ValueError("reward_info.finished must be a bool or null")
+            raise ValueError("Trajectory.finished must be a bool or None")
         response_mask = (
             torch.zeros_like(source_response_mask)
             if self._mask_unfinished_episode and finished is False
@@ -934,10 +1175,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         )
         input_ids = torch.cat([prompts, responses], dim=0)
         attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+        mm_processor_kwargs = trajectory.extra_fields.get("mm_processor_kwargs")
+        if mm_processor_kwargs is not None and not isinstance(mm_processor_kwargs, dict):
+            raise ValueError("trajectory extra_fields.mm_processor_kwargs must be a dict or null")
         multi_modal_inputs = compute_multi_modal_inputs(
             self._processor,
             input_ids.unsqueeze(0),
             trajectory.multi_modal_data,
+            mm_processor_kwargs,
         )
         if self._processor is None:
             position_ids = compute_position_id_with_mask(attention_mask.unsqueeze(0)).squeeze(0)
@@ -968,14 +1213,23 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             rm_scores[-1] = float(trajectory.reward_score)
         field["rm_scores"] = rm_scores
 
-        extra_fields = dict(trajectory.extra_fields)
-        extra_fields.pop("materialization_reason", None)
-        field.update(extra_fields)
+        field["extra_fields"] = {
+            **trajectory.extra_fields,
+            "reward_extra_info": dict(trajectory.reward_metrics),
+        }
         # Framework-owned masks must win over same-named Gateway extra fields.
         field["response_mask"] = response_mask
         field["loss_mask"] = response_mask
         field.pop("multi_modal_data", None)
-        for key in ("uid", "raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
+        for key in (
+            "uid",
+            "raw_prompt",
+            "data_source",
+            "reward_model",
+            "extra_info",
+            "tools_kwargs",
+            "agent_name",
+        ):
             if key in sample_fields:
                 field[key] = sample_fields[key]
         field["session_id"] = session_index
@@ -985,6 +1239,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         prompt_len = prompts.size(0)
         response_len = responses.size(0)
 
+        # The gateway reports the weight versions a trajectory spanned. Fall back to
+        # the dataloader step only when absent (backends that report no version):
+        # the trainer casts these tags with dtype=int, so None must not reach it.
         min_global_steps = trajectory.extra_fields.get("min_global_steps", global_steps)
         max_global_steps = trajectory.extra_fields.get("max_global_steps", global_steps)
         tag = {

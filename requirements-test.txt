@@ -1,0 +1,10 @@
+-e ./verl
+
+pytest_asyncio
+fastapi
+uvicorn
+cachetools
+vllm==0.23.0
+ray==2.54.1
+loguru
+pyzmq

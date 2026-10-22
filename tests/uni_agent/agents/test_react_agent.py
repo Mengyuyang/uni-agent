@@ -10,8 +10,18 @@ from uni_agent.tools import ToolResult
 
 
 class _FakeToolbox:
+    def __init__(self):
+        self.calls: list[tuple[str, object]] = []
+
     def schemas(self) -> list[dict]:
         return []
+
+    def names(self) -> list[str]:
+        return ["shell"]
+
+    async def call(self, name, args, *, timeout=None):
+        self.calls.append((name, args))
+        return ToolResult(text="ok")
 
     def entered(self, *, retry: int, timeout: float):
         return self
@@ -75,7 +85,6 @@ def _step_info(*, total_tokens: int = 0) -> dict:
         "num_tool_calls": 0,
         "timeouts": 0,
         "errors": 0,
-        "format_errors": 0,
         "total_tokens": total_tokens,
     }
 
@@ -85,10 +94,14 @@ def _agent() -> ReActAgent:
     return ReActAgent(ReActConfig(model=model, tools=[], max_steps=1))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_agent_result_defaults_to_unreported_completion():
     assert AgentResult().finished is None
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_model_forwards_finish_reason(monkeypatch):
     model = OpenAICompatibleChatModel(
@@ -114,6 +127,8 @@ async def test_model_forwards_finish_reason(monkeypatch):
     assert generation_info["finish_reason"] == "length"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("termination_reason", "expected"),
     [
@@ -124,7 +139,8 @@ async def test_model_forwards_finish_reason(monkeypatch):
 )
 @pytest.mark.asyncio
 async def test_react_reports_completion(monkeypatch, termination_reason: str, expected: bool):
-    monkeypatch.setattr(react_module.Toolbox, "from_specs", lambda specs, *, sandbox: _FakeToolbox())
+    toolbox = _FakeToolbox()
+    monkeypatch.setattr(react_module.Toolbox, "from_specs", lambda specs, *, sandbox: toolbox)
     monkeypatch.setattr(react_module, "OpenAICompatibleChatModel", _FakeModel)
 
     agent = _agent()
@@ -134,11 +150,14 @@ async def test_react_reports_completion(monkeypatch, termination_reason: str, ex
 
     monkeypatch.setattr(agent, "step", stop_with_reason)
 
-    result = await agent.run(sandbox=object(), messages=[])
+    result = await agent.run(sandbox=object(), messages=[], workdir="/testbed")
 
     assert result.finished is expected
+    assert toolbox.calls == [("shell", {"command": "cd -- /testbed"})]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_length_finish_reason_is_unfinished():
     agent = _agent()
@@ -149,6 +168,8 @@ async def test_length_finish_reason_is_unfinished():
     assert reason == "token_limit"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_length_exhausted_empty_response_ends_the_episode():
     # What the Gateway returns once the session's response budget is spent: an
@@ -162,6 +183,8 @@ async def test_length_exhausted_empty_response_ends_the_episode():
     assert reason == "token_limit"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_total_tokens_tracks_current_context_size():
     agent = _agent()
@@ -175,23 +198,22 @@ async def test_total_tokens_tracks_current_context_size():
     assert info["total_tokens"] == 102
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
-async def test_plain_text_retries_when_finish_tool_is_configured():
-    model = ModelConfig(base_url="http://gateway:8000/v1", model_name="policy")
-    agent = ReActAgent(ReActConfig(model=model, tools=[{"name": "submit"}], max_steps=2))
+async def test_plain_text_without_tool_call_finishes_episode():
+    agent = _agent()
     cfg: ReActConfig = agent.config  # type: ignore[assignment]
     transcript: list[dict] = []
-    info = _step_info()
 
-    reason = await agent.step(cfg, _StepModel(), _StepToolbox(), transcript, info)
+    reason = await agent.step(cfg, _StepModel(), _StepToolbox(), transcript, _step_info())
 
-    assert reason == "completed"
-    assert info["format_errors"] == 1
-    assert [message["role"] for message in transcript] == ["assistant", "user"]
-    assert "No tool call found" in transcript[-1]["content"]
-    assert "submit or finish" in transcript[-1]["content"]
+    assert reason == "finished"
+    assert [message["role"] for message in transcript] == ["assistant"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_failed_finish_tool_does_not_finish():
     agent = _agent()
@@ -220,6 +242,8 @@ async def test_failed_finish_tool_does_not_finish():
     assert info["errors"] == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_truncated_tool_call_is_not_dispatched():
     # The Gateway reports tool_calls, never length, whenever it parsed a tool call
@@ -245,16 +269,23 @@ async def test_truncated_tool_call_is_not_dispatched():
     assert toolbox.calls == []
 
 
-def _per_turn_capped_agent(*, max_tokens_per_turn: int, max_total_tokens: int | None = None) -> ReActAgent:
+def _per_turn_capped_agent(*, max_tokens_per_turn: int) -> ReActAgent:
     model = ModelConfig(
         base_url="http://gateway:8000/v1",
         model_name="policy",
-        max_tokens_per_turn=max_tokens_per_turn,
-        max_total_tokens=max_total_tokens,
     )
-    return ReActAgent(ReActConfig(model=model, tools=[], max_steps=2))
+    return ReActAgent(
+        ReActConfig(
+            model=model,
+            sampling_params_override={"max_tokens_per_turn": max_tokens_per_turn},
+            tools=[],
+            max_steps=2,
+        )
+    )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_per_turn_cap_truncation_ends_the_episode():
     agent = _per_turn_capped_agent(max_tokens_per_turn=8)
@@ -264,18 +295,4 @@ async def test_per_turn_cap_truncation_ends_the_episode():
     reason = await agent.step(cfg, model, _StepToolbox(), [], _step_info())
 
     assert model.sampling_params["max_tokens"] == 8
-    assert reason == "token_limit"
-
-
-@pytest.mark.asyncio
-async def test_max_tokens_is_clamped_to_the_remaining_episode_budget():
-    agent = _per_turn_capped_agent(max_tokens_per_turn=8, max_total_tokens=105)
-    cfg: ReActConfig = agent.config  # type: ignore[assignment]
-    # remaining episode budget (5) is below the per-turn cap (8), so the turn asks
-    # for the smaller of the two.
-    model = _StepModel(finish_reason="length", completion_tokens=5, prompt_tokens=99)
-
-    reason = await agent.step(cfg, model, _StepToolbox(), [], _step_info(total_tokens=100))
-
-    assert model.sampling_params["max_tokens"] == 5
     assert reason == "token_limit"

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     import aiohttp
     from swerex.runtime.abstract import Command
 
-    from .base import SandboxConfig
+    from .base import ImageMount, SandboxConfig
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +24,21 @@ _RUNTIME_PORT = 8000
 
 
 def _to_vefaas_image(image: str) -> str:
+    """Map a public image onto the veFaaS-hosted copy.
+
+    Images already on ``volces.com`` (including those rewritten by ``image_map``)
+    are left unchanged. Public aliases: ``python:3.12``, ``swebench/...``,
+    ``swerebench/...``.
+    """
+    if "volces.com" in image:
+        return image
     if image == "python:3.12":
         return "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12"
-    elif image.startswith("swebench/"):
+    if image.startswith("swebench/"):
         return image.replace("swebench/", "enterprise-public-cn-beijing.cr.volces.com/swe-bench-verified/") + ":v2"
-    elif image.startswith("swerebench/"):
+    if image.startswith("swerebench/"):
         return image.replace("swerebench/", "enterprise-public-cn-beijing.cr.volces.com/swe-rebench/") + ":latest"
-    else:
-        raise ValueError(f"Unsupported image: {image}")
+    raise ValueError(f"Unsupported image: {image}")
 
 
 def _split_env_list(raw: str | None) -> list[str]:
@@ -262,7 +269,13 @@ class VefaasSandbox(Sandbox):
         image: str = "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12",
         runtime_timeout: float = 3600.0,
         startup_timeout: float = 120.0,
+        image_mounts: list[ImageMount] | None = None,
+        executable_paths: dict[str, str] | None = None,
     ) -> None:
+        if image_mounts:
+            raise NotImplementedError("VefaasSandbox does not support image mounts")
+        if executable_paths:
+            raise NotImplementedError("VefaasSandbox does not support executable path overrides")
         self.image = image
         self.runtime_timeout = runtime_timeout
         self.startup_timeout = startup_timeout
@@ -281,7 +294,11 @@ class VefaasSandbox(Sandbox):
         # function env vars may each hold a comma-separated list of paired values;
         # each sandbox binds to one randomly chosen pair.
         return cls(
-            image=_to_vefaas_image(config.image), runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs
+            image=_to_vefaas_image(config.image),
+            runtime_timeout=config.runtime_timeout,
+            image_mounts=config.image_mounts,
+            executable_paths=config.executable_paths,
+            **config.sandbox_kwargs,
         )
 
     # ----- control plane -----

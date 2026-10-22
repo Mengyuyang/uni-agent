@@ -4,14 +4,24 @@ import logging
 
 import torch
 
+from uni_agent.tasks import TaskResult
 from verl.workers.rollout.replica import TokenOutput
 
 
 async def logging_runner(**kwargs):
     logging.getLogger("test.runner").info("runner task log")
+    return None
+
+
+async def typed_result_runner(**kwargs):
+    return TaskResult(reward=0.75, accuracy=1.0, finished=False)
 
 
 class FakeTokenizer:
+    # The fake template terminates each message with a newline and has no
+    # additional turn separator after that close token.
+    eos_token_id = ord("\n")
+
     def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, tools=None, **kwargs):
         parts = []
         for message in messages:
@@ -42,6 +52,17 @@ class FakeTokenizer:
         if content is None:
             return ""
         return str(content)
+
+
+class QwenVLTokenizer(FakeTokenizer):
+    """FakeTokenizer variant with the Qwen ChatML end-of-turn token."""
+
+    _SPECIAL_IDS = {
+        "<|im_end|>": 151645,
+    }
+
+    def convert_tokens_to_ids(self, token):
+        return self._SPECIAL_IDS.get(token)
 
 
 class FakeProcessor:
@@ -85,13 +106,24 @@ class FakeProcessor:
             "video_metadata": None if video_metadata is None else list(video_metadata),
             "return_tensors": return_tensors,
             "do_sample_frames": do_sample_frames,
+            "extra_kwargs": dict(kwargs),
         }
 
         prompt_ids = self.tokenizer.encode(text[0], add_special_tokens=False)
+        media_token_ids = []
         if images:
-            prompt_ids.extend([self.image_token_id] * len(images))
+            media_token_ids.extend([self.image_token_id] * len(images))
         if videos:
-            prompt_ids.extend([self.video_token_id] * len(videos))
+            media_token_ids.extend([self.video_token_id] * len(videos))
+        # Real VL processors expand media placeholders inside the rendered
+        # message, before a trailing assistant scaffold. Preserve that prefix
+        # stability so Continuous Token can suffix-diff renders with and without
+        # ``add_generation_prompt``.
+        generation_prompt_ids = self.tokenizer.encode("assistant:", add_special_tokens=False)
+        if media_token_ids and prompt_ids[-len(generation_prompt_ids) :] == generation_prompt_ids:
+            prompt_ids[-len(generation_prompt_ids) :] = media_token_ids + generation_prompt_ids
+        else:
+            prompt_ids.extend(media_token_ids)
 
         input_ids = torch.tensor([prompt_ids], dtype=torch.long)
         attention_mask = torch.ones_like(input_ids)
@@ -184,7 +216,16 @@ class InspectingBackend:
         self.calls = []
         self.next_error = None
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         if self.next_error is not None:
             error = self.next_error
             self.next_error = None
@@ -220,7 +261,16 @@ class InspectingSequencedBackend:
     def __init__(self, steps):
         self.steps = list(steps)
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         step = self.steps.pop(0)
         if step == "__inspect__":
             text = json.dumps(
@@ -250,7 +300,16 @@ class QueuedBackend:
     def __init__(self, responses):
         self._responses = list(responses)
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         text = self._responses.pop(0)
         token_ids = [ord(char) for char in text]
         return TokenOutput(
@@ -289,7 +348,16 @@ class RejectRequestEnvelopeBackend:
         self.response_text = response_text
         self.expected_sampling_params = expected_sampling_params
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         assert "messages" not in sampling_params
         assert "model" not in sampling_params
         assert "tools" not in sampling_params
@@ -310,7 +378,16 @@ class FailingBackend:
         self.error_message = error_message
         self.calls = []
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         self.calls.append(
             {
                 "request_id": request_id,
@@ -328,7 +405,16 @@ class SequencedBackend:
         self.steps = list(steps)
         self.calls = []
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         self.calls.append(
             {
                 "request_id": request_id,
@@ -336,6 +422,7 @@ class SequencedBackend:
                 "sampling_params": dict(sampling_params),
                 "image_data": image_data,
                 "video_data": video_data,
+                "mm_processor_kwargs": mm_processor_kwargs,
             }
         )
         step = self.steps.pop(0)
@@ -355,7 +442,16 @@ class RecordingConcurrentBackend:
         self._delay = delay
         self.call_windows = []
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         started_at = asyncio.get_running_loop().time()
         try:
             await asyncio.sleep(self._delay)

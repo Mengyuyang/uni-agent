@@ -15,7 +15,7 @@ A normal episode runs from the top down:
 2. The `Task` starts its `Sandbox` and builds the configured `Agent`.
 3. The `Agent` interacts with the sandbox directly (black-box agent) or through a `Toolbox` (white-box agent).
 4. The `Task` evaluates the resulting sandbox state via `reward` module.
-5. The task returns a `TaskResult` containing the reward, metrics, and evaluation details.
+5. The task returns a `TaskResult` containing reward, accuracy, completion state, and evaluation details.
 
 ```text
 Task
@@ -51,13 +51,12 @@ The run-level Task Config defines common behavior such as the Agent, Tools, Sand
   agent:
     name: react
     tools:
-      - name: stateful_shell
       - name: str_replace_editor
+      - name: stateful_shell
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 0.8
       top_p: 0.9
-      max_total_tokens: 65536
 ```
 
 Each sample can then provide or override fields such as its prompt, metadata, sandbox image, budgets, or other nested Task settings:

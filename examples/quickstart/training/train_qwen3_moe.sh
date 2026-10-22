@@ -22,6 +22,7 @@ GATEWAY_COUNT=${GATEWAY_COUNT:-8}            # gateway actors fronting the engin
 CONCURRENCY=${CONCURRENCY:-512}              # max in-flight rollout sessions (runner cap)
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"$(basename "${MODEL_PATH}")"}
 MASK_UNFINISHED_EPISODE=${MASK_UNFINISHED_EPISODE:-False}  # opt-in: zero the loss mask for unfinished episodes
+TRAJECTORY_SELECTION=${TRAJECTORY_SELECTION:-all}  # all | longest; Claude Code should use longest
 
 rollout_mode=${ROLLOUT_MODE:-"async"}
 rollout_name=${ROLLOUT_NAME:-"vllm"} # sglang or vllm
@@ -111,7 +112,8 @@ router_replay_mode=${ROUTER_REPLAY_MODE:-disabled}                    # disabled
 enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY:-False} # required only for R3
 
 ray job submit --no-wait --runtime-env $RUNTIME_ENV \
-    -- python3 -m verl.trainer.main_ppo \
+    -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
+    python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
@@ -151,6 +153,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=$USE_MBRIDGE \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${offload} \
@@ -202,13 +205,13 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     ++actor_rollout_ref.rollout.custom.agent_framework.gateway_count=${GATEWAY_COUNT} \
     ++actor_rollout_ref.rollout.custom.agent_framework.log_dir=${AGENT_LOG_DIR} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_fqn=uni_agent.framework.task_runner.run_task \
+    ++actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys="[temperature,top_p,top_k]" \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.dispatch_mode=ray_task \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.max_concurrent_sessions=${CONCURRENCY} \
+    ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.trajectory_selection=${TRAJECTORY_SELECTION} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.task_config_path=${TASK_CONFIG} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.model_name=${SERVED_MODEL_NAME} \
-    ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.report_reward=True \
     ++actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode=${MASK_UNFINISHED_EPISODE} \
-    ++actor_rollout_ref.rollout.custom.agent_framework.use_reward_loop_worker=False \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.prompt_length=${max_prompt_length} \
@@ -239,6 +242,8 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=${train_ep} \
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${train_etp} \
     reward.reward_manager.name=dapo \
+    reward.custom_reward_function.path=pkg://uni_agent.framework.task_runner \
+    reward.custom_reward_function.name=score_from_runner_result \
     +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
     +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
     +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \

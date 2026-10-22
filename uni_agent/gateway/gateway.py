@@ -15,32 +15,41 @@ import ray
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from uni_agent.gateway.adapters.agent_context import agent_context_from_headers
 from uni_agent.gateway.adapters.anthropic import (
     anthropic_build_response,
     anthropic_error_body,
     anthropic_stream_response,
     anthropic_to_internal,
 )
-from uni_agent.gateway.adapters.openai import (
+from uni_agent.gateway.adapters.openai_chat import (
     openai_build_response,
     openai_error_body,
     openai_stream_response,
     openai_to_internal,
 )
+from uni_agent.gateway.adapters.openai_response import (
+    responses_build_response,
+    responses_error_body,
+    responses_stream_response,
+    responses_to_internal,
+)
 from uni_agent.gateway.adapters.types import AnthropicRequest, MalformedRequestError, OpenAIChatCompletionRequest
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
+    AgentContext,
     GatewaySession,
     MessageCodec,
     SessionHandle,
     Trajectory,
 )
+from uni_agent.gateway.session.types import UnsupportedMediaError
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
-DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"max_tokens", "stop"})
 
-logger = logging.getLogger("gateway")
+logger = logging.getLogger(__name__)
 
 
 def _validate_sampling_params(sampling_params: dict[str, Any]) -> None:
@@ -70,16 +79,20 @@ class _GatewayActor:
             vision_info_extractor=config.vision_info_extractor,
             vision_info_extractor_kwargs=config.vision_info_extractor_kwargs,
             tool_parser_name=config.tool_parser_name,
+            rollout_backend=config.rollout_backend,
+            enable_tool_parser_cache=config.enable_tool_parser_cache,
+            hf_model_type=config.hf_model_type,
             apply_chat_template_kwargs=config.apply_chat_template_kwargs,
+            mm_processor_kwargs=config.mm_processor_kwargs,
         )
-        self._allowed_request_sampling_param_keys = (
-            DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS
-            if config.allowed_request_sampling_param_keys is None
-            else frozenset(config.allowed_request_sampling_param_keys)
+        self._allowed_request_sampling_param_keys = frozenset(DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS).union(
+            config.allowed_request_sampling_param_keys or ()
         )
+        self._warned_discarded_request_sampling_param_keys: set[str] = set()
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
         self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
+        self._coalesce_reserved_exact_requests = config.coalesce_reserved_exact_requests
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -88,11 +101,13 @@ class _GatewayActor:
         self._register_routes()
 
     def _register_routes(self) -> None:
-        """Register provider HTTP handlers and reward metadata."""
+        """Register provider HTTP handlers."""
 
         def _error_body_for_path(path: str, status_code: int, message: str) -> dict[str, Any]:
             if path.endswith("/v1/messages"):
                 return anthropic_error_body(status_code, message)
+            if path.endswith("/v1/responses"):
+                return responses_error_body(status_code, message)
             return openai_error_body(status_code, message)
 
         @self._app.exception_handler(HTTPException)
@@ -106,6 +121,14 @@ class _GatewayActor:
             return JSONResponse(
                 status_code=exc.status_code,
                 content=_error_body_for_path(request.url.path, exc.status_code, message),
+            )
+
+        @self._app.exception_handler(MalformedRequestError)
+        @self._app.exception_handler(UnsupportedMediaError)
+        async def _bad_request_handler(request: Request, exc: ValueError):
+            return JSONResponse(
+                status_code=400,
+                content=_error_body_for_path(request.url.path, 400, str(exc)),
             )
 
         @self._app.exception_handler(Exception)
@@ -126,7 +149,19 @@ class _GatewayActor:
                 payload = await request.json()
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-            return await self._handle_openai_chat_completions(session_id=session_id, payload=payload)
+            return await self._handle_openai_chat_completions(
+                session_id=session_id, payload=payload, agent_context=agent_context_from_headers(request.headers)
+            )
+
+        @self._app.post("/sessions/{session_id}/v1/responses")
+        async def _openai_responses(session_id: str, request: Request):
+            try:
+                payload = await request.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+            return await self._handle_openai_responses(
+                session_id=session_id, payload=payload, agent_context=agent_context_from_headers(request.headers)
+            )
 
         @self._app.post("/sessions/{session_id}/v1/messages")
         async def _anthropic_messages(session_id: str, request: Request):
@@ -134,17 +169,9 @@ class _GatewayActor:
                 payload = await request.json()
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-            return await self._handle_anthropic_messages(session_id=session_id, payload=payload)
-
-        @self._app.post("/sessions/{session_id}/reward_info")
-        async def _reward_info(session_id: str, request: Request):
-            payload = await request.json()
-            reward_info = payload.get("reward_info")
-            try:
-                await self.set_reward_info(session_id=session_id, reward_info=reward_info)
-            except KeyError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            return JSONResponse({"status": "ok"})
+            return await self._handle_anthropic_messages(
+                session_id=session_id, payload=payload, agent_context=agent_context_from_headers(request.headers)
+            )
 
     def _require_started(self) -> None:
         """Raise if the HTTP server has not been started."""
@@ -162,6 +189,7 @@ class _GatewayActor:
         self,
         session_id: str,
         payload: OpenAIChatCompletionRequest,
+        agent_context: AgentContext | None = None,
     ) -> JSONResponse | StreamingResponse:
         """Validate an OpenAI Chat Completions payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
@@ -175,19 +203,67 @@ class _GatewayActor:
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
+            discarded_keys = (
+                session.sampling_params.keys()
+                & payload.keys()
+                - self._allowed_request_sampling_param_keys
+                - self._warned_discarded_request_sampling_param_keys
+            )
+            if discarded_keys:
+                logger.warning(
+                    "Ignoring request sampling parameters not enabled by allowed_request_sampling_param_keys: %s",
+                    ", ".join(sorted(discarded_keys)),
+                )
+                self._warned_discarded_request_sampling_param_keys.update(discarded_keys)
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        if agent_context is not None:
+            internal["agent_context"] = agent_context
         outcome = await session.run_generation(internal, self._backend)
         model = str(payload.get("model") or "unknown")
         if payload.get("stream") is True:
             return openai_stream_response(outcome, model=model)
         return JSONResponse(openai_build_response(outcome, model=model))
 
+    async def _handle_openai_responses(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        agent_context: AgentContext | None = None,
+    ) -> JSONResponse | StreamingResponse:
+        """Validate a Responses API payload and serialize the session outcome."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
+
+        try:
+            internal = responses_to_internal(
+                payload,
+                base_sampling_params=dict(session.sampling_params),
+                allowed_sampling_keys=self._allowed_request_sampling_param_keys,
+            )
+            _validate_sampling_params(internal["sampling_params"])
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if agent_context is not None:
+            internal["agent_context"] = agent_context
+        outcome = await session.run_generation(internal, self._backend)
+        model = str(payload.get("model") or "unknown")
+        try:
+            if payload.get("stream") is True:
+                return responses_stream_response(outcome, payload=payload, model=model)
+            response = responses_build_response(outcome, payload=payload, model=model)
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(response)
+
     async def _handle_anthropic_messages(
         self,
         session_id: str,
         payload: AnthropicRequest,
+        agent_context: AgentContext | None = None,
     ) -> JSONResponse | StreamingResponse:
         """Validate an Anthropic Messages payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
@@ -201,9 +277,23 @@ class _GatewayActor:
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
+            discarded_keys = (
+                session.sampling_params.keys()
+                & payload.keys()
+                - self._allowed_request_sampling_param_keys
+                - self._warned_discarded_request_sampling_param_keys
+            )
+            if discarded_keys:
+                logger.warning(
+                    "Ignoring request sampling parameters not enabled by allowed_request_sampling_param_keys: %s",
+                    ", ".join(sorted(discarded_keys)),
+                )
+                self._warned_discarded_request_sampling_param_keys.update(discarded_keys)
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        if agent_context is not None:
+            internal["agent_context"] = agent_context
         outcome = await session.run_generation(internal, self._backend)
         model = str(payload.get("model") or "unknown")
         if payload.get("stream") is True:
@@ -245,7 +335,6 @@ class _GatewayActor:
         handle = SessionHandle(
             session_id=session_id,
             base_url=f"{self._server_base_url}/sessions/{session_id}/v1",
-            reward_info_url=f"{self._server_base_url}/sessions/{session_id}/reward_info",
         )
         self._sessions[session_id] = GatewaySession(
             handle=handle,
@@ -254,13 +343,10 @@ class _GatewayActor:
             response_length=self._response_length,
             sampling_params=sampling_params,
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
+            coalesce_reserved_exact_requests=self._coalesce_reserved_exact_requests,
+            metadata=metadata,
         )
         return handle
-
-    async def set_reward_info(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
-        """Attach optional reward metadata to a live session."""
-        session = self._get_session(session_id)
-        await session.set_reward_info(reward_info)
 
     async def finalize_session(self, session_id: str) -> list[Trajectory]:
         """Finalize a session, remove it from the actor, and return its trajectories."""

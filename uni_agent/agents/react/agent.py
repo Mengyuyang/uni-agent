@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
 from uni_agent.tools import Toolbox
 
-from ..base import Agent, AgentConfig, AgentResult
+from ..base import Agent, AgentConfig, AgentResult, RequestSamplingConfig
 from ..registry import register_agent
 from .model import OpenAICompatibleChatModel
 
@@ -21,25 +22,16 @@ logger = logging.getLogger(__name__)
 #: Tool names that end the episode when the policy calls them.
 _FINISH_TOOLS = {"submit", "finish"}
 
-_NO_TOOL_CALL_RETRY = (
-    "No tool call found in your previous response. Use one of the available tools to continue. "
-    "When the task is complete, call the submit or finish tool."
-)
-
-
-def _has_configured_finish_tool(cfg: ReActConfig) -> bool:
-    """Whether this episode requires an explicit submit/finish call."""
-    return any(spec.get("name") in _FINISH_TOOLS for spec in cfg.tools)
-
 
 class ReActConfig(AgentConfig):
     """White-box launch params: host-side tools + step / timeout budgets."""
 
     name: str = "react"
+    sampling_params_override: RequestSamplingConfig = Field(default_factory=RequestSamplingConfig)
     tools: list[dict] = Field(
         default_factory=lambda: [
-            {"name": "stateful_shell", "command_timeout": 120},
             {"name": "str_replace_editor"},
+            {"name": "stateful_shell", "command_timeout": 120},
             {"name": "submit"},
         ],
         description="Host-side tools exposed to the policy (each a {name, ...kwargs} entry). "
@@ -68,6 +60,7 @@ class ReActAgent(Agent):
         *,
         sandbox: Sandbox,
         messages: list[dict[str, Any]],
+        workdir: str | None = None,
     ) -> AgentResult:
         cfg: ReActConfig = self.config  # type: ignore[assignment]
         if cfg.model.base_url is None:
@@ -78,7 +71,7 @@ class ReActAgent(Agent):
             base_url=cfg.model.base_url,
             api_key=cfg.model.api_key,
             model_name=cfg.model.model_name,
-            sampling_params=cfg.model.sampling_params(),
+            sampling_params=cfg.sampling_params_override.sampling_params(),
             tools_schemas=toolbox.schemas(),
         )
 
@@ -90,12 +83,13 @@ class ReActAgent(Agent):
             "num_tool_calls": 0,
             "timeouts": 0,
             "errors": 0,
-            "format_errors": 0,
             "total_tokens": 0,
         }
         termination_reason = "unknown"
         try:
             async with toolbox.entered(retry=3, timeout=60):
+                if workdir is not None and "shell" in toolbox.names():
+                    await toolbox.call("shell", {"command": f"cd -- {shlex.quote(workdir)}"})
                 for step_idx in range(1, cfg.max_steps + 1):
                     trajectory_info["steps"] = step_idx
                     stop_reason = await self.step(cfg, model, toolbox, transcript, trajectory_info)
@@ -115,10 +109,13 @@ class ReActAgent(Agent):
         logger.info(
             f"Episode done: termination_reason={termination_reason} steps={trajectory_info['steps']} "
             f"tool_calls={trajectory_info['num_tool_calls']} timeouts={trajectory_info['timeouts']} "
-            f"errors={trajectory_info['errors']} format_errors={trajectory_info['format_errors']} "
-            f"total_tokens={trajectory_info['total_tokens']}"
+            f"errors={trajectory_info['errors']} total_tokens={trajectory_info['total_tokens']}"
         )
-        return AgentResult(transcript=transcript, info=trajectory_info, finished=termination_reason == "finished")
+        return AgentResult(
+            transcript=transcript,
+            info=trajectory_info,
+            finished=termination_reason == "finished",
+        )
 
     async def step(
         self,
@@ -132,18 +129,10 @@ class ReActAgent(Agent):
         logger.info(f"{'=' * 25} STEP {info['steps']} {'=' * 25}")
 
         # step 1: query the model
-        max_tokens = cfg.model.max_tokens_per_turn or cfg.model.max_total_tokens
-        if cfg.model.max_total_tokens is not None:
-            remaining = cfg.model.max_total_tokens - info["total_tokens"]
-            if remaining <= 0:
-                logger.info(f"Exit: token budget spent ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
-                return "token_limit"
-            max_tokens = min(max_tokens, remaining)
-
-        sampling_params: dict[str, Any] = cfg.model.sampling_params()
-        if max_tokens is not None:  # both budgets unset -> let the server run to EOS
-            sampling_params["max_tokens"] = max_tokens
-        content, tool_calls, gen_info = await model.query(transcript, sampling_params=sampling_params)
+        content, tool_calls, gen_info = await model.query(
+            transcript,
+            sampling_params=cfg.sampling_params_override.sampling_params(),
+        )
         info["total_tokens"] = gen_info["prompt_tokens"] + gen_info["completion_tokens"]
         finish_reason = gen_info.get("finish_reason")
         logger.info(
@@ -157,23 +146,13 @@ class ReActAgent(Agent):
             assistant_msg["tool_calls"] = tool_calls
         transcript.append(assistant_msg)
 
-        if cfg.model.max_total_tokens is not None and info["total_tokens"] >= cfg.model.max_total_tokens:
-            logger.info(f"Exit: token budget reached ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
-            return "token_limit"
-
         if finish_reason == "length":
             logger.info("Exit: response truncated at a token cap.")
             return "token_limit"
 
         if not tool_calls:
-            if _has_configured_finish_tool(cfg):
-                info["format_errors"] += 1
-                transcript.append({"role": "user", "content": _NO_TOOL_CALL_RETRY})
-                logger.warning("No tool call found; asking the policy to retry with an explicit tool call.")
-                return "completed"
-            else:
-                logger.info("💬 FINISHED: policy replied with plain text (no tool call).")
-                return "finished"
+            logger.info("💬 FINISHED: policy replied with plain text (no tool call).")
+            return "finished"
 
         # step 2: dispatch the tool calls
         saw_finish = False
@@ -191,7 +170,7 @@ class ReActAgent(Agent):
                 )
             elif tool_result.status != "ok":
                 info["errors"] += 1
-                logger.error(f"❌ TOOL {tool_result.status.upper()} ({name}):\n{observation}")
+                logger.warning(f"❌ TOOL {tool_result.status.upper()} ({name}):\n{observation}")
             else:
                 logger.info(f"👀 OBSERVATION ({name}):\n{observation}")
 
