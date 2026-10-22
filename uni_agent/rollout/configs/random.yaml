@@ -1,0 +1,2 @@
+# 纯随机选择（不看路由键、不看负载），用于做基线对照。
+router_class: uni_agent.rollout.decode_selectors.RandomDecodeSelector

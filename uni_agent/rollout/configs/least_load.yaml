@@ -1,0 +1,4 @@
+# PD decode-node selector plugin config (FQN ``router_class``).
+# ``router_class`` is the FQN; every remaining key is passed to the constructor.
+router_class: uni_agent.rollout.decode_selectors.LeastLoadDecodeSelector
+sample_size: 2

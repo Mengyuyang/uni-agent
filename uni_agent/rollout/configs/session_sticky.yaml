@@ -1,0 +1,26 @@
+# PD decode-node selector plugin config (FQN ``router_class``).
+#
+# session_sticky: session-scoped stickiness + hash spread + light overload guard.
+#
+#   - The sticky key is the *session* (``routing_key``), NOT the prompt prefix.
+#     Every turn of a session lands on the same decode replica, which is what
+#     actually buys cross-turn KV reuse. Different sessions are rendezvous-hashed
+#     across the replicas, so the ~96-100% shared system-prompt prefix can no
+#     longer drag all traffic onto a single replica (the failure mode observed
+#     with cache_aware: 4.7:1 request skew and a 92.7% KV peak).
+#   - Overload is judged by explicit hard thresholds only. When the sticky owner
+#     is overloaded the selector rebalances onto the least loaded replica, and
+#     `stats` counts sticky / rebalance / overload_all / no_key separately.
+#
+# Budget sizing for this workload: prompts are ~18-30k tokens and each decode
+# replica holds ~20-60 concurrent requests, i.e. 0.5-1.8M in-flight prompt
+# tokens; hence the 2M default budget.
+router_class: uni_agent.rollout.decode_selectors.SessionStickyDecodeSelector
+kv_hard_stop: 0.95             # KV usage >= this  -> replica treated as overloaded
+wait_budget: 32                # waiting depth >= this -> replica treated as overloaded
+inflight_token_budget: 2000000 # in-flight prompt tokens per replica -> overloaded
+kv_high_watermark: 0.8         # ranking only (does NOT mark a replica overloaded)
+snapshot_interval_secs: 1.0    # background /metrics poll interval per replica
+snapshot_timeout_secs: 0.15
+snapshot_stale_secs: 3.0
+log_interval_secs: 60          # throttle for the overload-guard warning

@@ -1,0 +1,2 @@
+# HRW（rendezvous）哈希：按 routing_key 计算权重，选最高者（需要 routing_key）。
+router_class: uni_agent.rollout.decode_selectors.RendezvousHashDecodeSelector
