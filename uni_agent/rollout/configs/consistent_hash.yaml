@@ -1,0 +1,3 @@
+# PD decode-node selector plugin config (FQN ``router_class``).
+router_class: uni_agent.rollout.decode_selectors.ConsistentHashDecodeSelector
+virtual_nodes: 160
