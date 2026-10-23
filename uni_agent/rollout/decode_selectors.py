@@ -1,11 +1,11 @@
 """PD decode-node scheduling strategies (uni-agent side, one-shot select).
 
-Each strategy is a plain class implementing verl's structural
-``PDDecodeSelector`` protocol: ``select(req, candidates) -> DecodeCandidate``.
+Each strategy is a plain class with the uni-agent selector interface:
+``select(req, candidates) -> DecodeCandidate``. ``SelectorRouter`` exposes
+these policies through verl's standard request-load-balancer protocol.
 The cache-aware and hash strategies are ported from the private repo's
 ``pd_routing.py`` (token radix tree + FBI/murmur hash), keeping the original
-selection semantics but reading load from each decode server's
-``get_load_snapshot()`` in-flight counter instead of acquire/release.
+selection semantics and maintaining local select/release load estimates.
 
 A strategy that keeps cross-request state may additionally implement the
 optional ``reset()`` hook. verl calls it when the decode replicas' prefix cache
@@ -24,12 +24,17 @@ import time
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Sequence
-
-if TYPE_CHECKING:
-    from verl.workers.rollout.pd_decode_selector import DecodeCandidate
+from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DecodeCandidate:
+    """A decode server exposed to the uni-agent selector implementations."""
+
+    key: str
+    handle: Any
 
 
 # ── FBI / murmur hash (ported from pd_routing.py) ──────────────────────────

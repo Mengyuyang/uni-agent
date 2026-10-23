@@ -1,23 +1,15 @@
-# Ascend PD routing: fork review guide
+# Ascend PD routing: final-local snapshot
 
-This change ports the routing portion of the corrected `uni-agent1013-dr.rar`
-snapshot to current main. It is for review in the owner's fork, not an upstream
-submission or a claim of hardware readiness.
+Updated: 2026-10-23. This fork PR now follows `uni-agent1013-dr-final-local.rar`
+(SHA256 `8AF98361FE5C19978106076F1B637687DC179F3A72ED656AD617FDA54124F9D5`).
+It supersedes the earlier PD-specific adapter/configuration design.
 
-## Responsibilities
+## Responsibilities and configuration
 
-- Uni-Agent selectors choose a decode server; they do not copy KV buffers.
-- The companion verl change wraps selectors in its request-load-balancer
-  protocol, runs P then D, and owns P/D engine lifecycle and metrics discovery.
-- A matched vLLM-Ascend `MooncakeConnectorV1` and Mooncake build own KV transfer.
-  Their dependency patches are not included in these two repository changes.
-
-The current training architecture is retained. Retired blackbox runners are not
-restored. Existing fork commits remain in the synchronized main's Git ancestry.
-
-## Selecting a policy
-
-In the companion verl configuration:
+Uni-Agent owns the pure selector classes, `DecodeCandidate`, and the new
+`uni_agent.rollout.router_balancer.SelectorRouter`. The adapter implements
+verl's standard router protocol. The companion verl change calls its existing
+`get_router_handle` factory; no verl-local `pd_decode_selector.py` is needed.
 
 ```yaml
 actor_rollout_ref:
@@ -25,61 +17,87 @@ actor_rollout_ref:
     disaggregation:
       enabled: true
       transfer_backend: mooncake
-      decode_policy:
-        router_config_path: pkg://uni_agent.rollout.configs/session_sticky.yaml
+    custom:
+      pd_router_config_path: /absolute/path/to/session_sticky.yaml
 ```
 
-This is a configuration fragment, not a complete training recipe. P/D topology,
-model, resource allocation and runtime dependencies must also be configured.
-Set the path to null to use verl's built-in sticky/least-inflight router without
-these optional selectors. The seven YAML resources are included in wheels.
+Example policy YAML:
 
-| Policy | Decision |
+```yaml
+router_class: uni_agent.rollout.router_balancer.SelectorRouter
+selector_class: uni_agent.rollout.decode_selectors.SessionStickyDecodeSelector
+inflight_token_budget: 2000000
+```
+
+This is a fragment, not a complete training recipe. The router path must be
+readable in the Ray actor's environment. The upstream loader expects a normal
+filesystem path, not the previous `pkg://...` resource URL. YAML files remain
+packaged in the Uni-Agent wheel; `importlib.resources.files` can locate them.
+
+The former `disaggregation.decode_policy.router_config_path` and role-specific
+memory/batch schema are removed from the companion verl PR. An unset
+`custom.pd_router_config_path` now retains PD round-robin, not the previous
+default sticky/least-inflight router. Custom PD routing is Ascend-only; GPU PD
+keeps its upstream selection and connector behavior.
+
+## Policies
+
+| YAML | Decision |
 | --- | --- |
-| random | Random candidate; comparison baseline |
-| least_load / power_of_two | Sample candidates and minimize local in-flight requests |
-| consistent_hash | Virtual-node hash ring keyed by the session |
-| rendezvous_hash | Highest hash score for session/server pair |
-| cache_aware | Estimated token-prefix ownership, with load-imbalance fallback |
-| session_sticky | Session hash affinity, with KV/queue/token-pressure fallback |
+| random | Random candidate |
+| least_load / power_of_two | Same class: sample k candidates, default k=2, minimize local in-flight count |
+| consistent_hash | Virtual-node hash ring keyed by session |
+| rendezvous_hash | Highest session/server hash score |
+| cache_aware | Estimated token-prefix ownership with load-imbalance fallback |
+| session_sticky | Session hash affinity with KV/queue/token-pressure fallback |
 
-Cache-aware ownership is an estimate based on routed prompts, not proof that
-the engine still holds those KV blocks. Cache invalidation must reset that state.
-Session-sticky uses the session identity to avoid concentrating unrelated SWE
-tasks that share the same system/tool prompt on a single decode replica.
+SWE tasks share system/tool prefixes, so prefix ownership alone can concentrate
+unrelated sessions on one D. Session identity helps spread those sessions while
+retaining cross-turn affinity. This does not guarantee actual engine KV hits.
 
-## Source and porting differences
+The mounted Claude Code executable check is retained from the previous source.
+It optimizes sandbox startup and is not part of KV transfer.
 
-The original routing implementation and seven policy configs are retained.
-The port adds package-data inclusion and moves the verl candidate type import
-under `TYPE_CHECKING`, so importing the pure policies does not start importing
-the entire verl/Torch runtime. Unused Ray import and formatting are cleaned up.
-The mounted Claude Code executable check is a sandbox startup optimization, not
-a KV-transfer feature; it prefers `/opt/claude-code/bin/claude` before installers.
+## Adapter lifecycle and known limits
 
-## Known limitations and merge gates
+The adapter forwards `prompt_ids`, maps candidates to server IDs/handles, and
+exposes acquire/release, server-pool updates, status and cache reset.
 
-The source's session-sticky policy releases prompt-token weights FIFO per
-server. If requests finish out of order, pending-token estimates are incorrect:
-after selecting 10000 then 1000 tokens, finishing the short request first leaves
-1000 recorded rather than 10000. Request-exact reservation/release needs follow-up
-before relying on this optional policy for accurate pressure decisions.
+**Receiving request_id is not request-exact release.** The final source still
+ignores that argument inside release and calls `selector.release(index)`.
+Session-sticky pops prompt weights FIFO: selecting 10000 then 1000 tokens and
+finishing the short request first records 1000 instead of 10000 outstanding.
+A characterization test preserves this known limitation; it does not certify
+correct accounting. A follow-up needs unique per-call reservations separate
+from the session-affinity key.
 
-All-hot routing still dispatches a request; this is not admission control.
-Metrics snapshots can be stale or absent. The source's performance numbers in
-comments are colleague observations, not independently reproduced benchmarks.
-Changing the candidate pool resets local bookkeeping and needs drain-aware use.
+`get_total_inflight` returns token weight for session-sticky, request count for
+least-load/cache-aware, and zero for stateless strategies. These are not uniform
+request-count semantics. Pool changes reset index-based estimates; use them
+with drain-aware lifecycle management.
 
-Run from this repository root:
+All-hot routing still dispatches and is not admission control. Metrics can be
+stale/missing. Source-comment performance numbers were not independently
+reproduced. Final-local contains no dependency tree; matched vLLM-Ascend/Mooncake
+with the required connector/RPC remains an external deployment prerequisite.
+
+## Validation and provenance
 
 ```bash
-python -m pytest -q tests/test_decode_selectors.py tests/uni_agent/agents/test_claude_code_agent.py --noconftest
+python -m pytest -q tests/test_decode_selectors.py tests/test_router_balancer.py tests/uni_agent/agents/test_claude_code_agent.py --noconftest
 ```
 
-Local result: **51 passed** on Python 3.12; changed-file Ruff lint/format and
-Python compilation passed. These tests do not run NPU training, actual sandbox
-installation, Ray routing, or Mooncake transfer. The companion verl application
-tests were blocked locally by a Windows PyTorch DLL load failure.
+Local Python 3.12 result: **59 passed, 7 subtests passed**. Tests use actual
+policies/adapter and a no-network pressure source. They do not validate Ray
+actor startup, NPU, actual sandbox installation, or KV transport.
+Changed-file pre-commit checks (Ruff, formatting, mypy and compileall) passed.
 
-AI assistance was used in analysis, porting, tests and documentation. Human
-line-by-line review and target-hardware validation remain required before merge.
+Porting additionally preserves package-data inclusion, avoids unused runtime
+Ray/Torch imports, and extends adapter regression coverage. The private launchers
+and archived runtime credentials are not included. In the archive,
+`run_train_baseline.sh` and the launcher tests still reference removed schema
+and missing dependencies; do not treat them as validated final recipes.
+
+See [companion verl PR](https://github.com/Mengyuyang/verl/pull/2).
+AI assistance was used; human line review and target-hardware validation remain
+required before merge. This is a fork-only draft, not an upstream submission.

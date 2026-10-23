@@ -1,4 +1,3 @@
-# power_of_two == least_load(k=2)：随机取 2 个解码节点，选本地在飞计数更小者。
-# 与原版 verl pd_routing.power_of_two 口径一致（纯本地计数，不依赖远端快照）。
-router_class: uni_agent.rollout.decode_selectors.LeastLoadDecodeSelector
+router_class: uni_agent.rollout.router_balancer.SelectorRouter
+selector_class: uni_agent.rollout.decode_selectors.LeastLoadDecodeSelector
 sample_size: 2

@@ -1,9 +1,5 @@
-# PD decode-node selector plugin config (FQN ``router_class``).
-# 2026-10-08: thresholds aligned with the reference cache_aware policy
-# (vLLM Router): 0.5 / 32 / 1.1. Previously 0.3 / 64 / 1.5, where the balance
-# gate (max-min > 64 and max > 1.5*min) was effectively unreachable at
-# max_concurrent_sessions=96.
-router_class: uni_agent.rollout.decode_selectors.CacheAwareDecodeSelector
+router_class: uni_agent.rollout.router_balancer.SelectorRouter
+selector_class: uni_agent.rollout.decode_selectors.CacheAwareDecodeSelector
 cache_threshold: 0.5
 balance_abs_threshold: 32
 balance_rel_threshold: 1.1
