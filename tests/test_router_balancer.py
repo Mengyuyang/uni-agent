@@ -32,15 +32,17 @@ class TestSelectorRouter(unittest.TestCase):
         first_id, first_handle = self.router.acquire_server(
             "session-a",
             prompt_ids=list(range(32)),
+            reservation_id="turn-1",
         )
         second_id, second_handle = self.router.acquire_server(
             "session-a",
             prompt_ids=list(range(32)),
+            reservation_id="turn-2",
         )
         self.assertEqual(first_id, second_id)
         self.assertIs(first_handle, second_handle)
         self.assertEqual(self.router.get_total_inflight(), 64)
-        self.router.release_server(first_id, "session-a")
+        self.router.release_server(first_id, "session-a", reservation_id="turn-1")
         self.assertEqual(self.router.get_total_inflight(), 32)
 
     def test_server_pool_can_be_updated(self):
@@ -61,8 +63,8 @@ class TestSelectorRouter(unittest.TestCase):
         self.assertIn(server_id, self.servers)
 
     def test_declares_upstream_protocol_fields(self):
-        self.assertEqual(self.router.require_acquire_fields(), ["prompt_ids"])
-        self.assertEqual(self.router.require_release_fields(), ["request_id"])
+        self.assertEqual(self.router.require_acquire_fields(), ["prompt_ids", "reservation_id"])
+        self.assertEqual(self.router.require_release_fields(), ["request_id", "reservation_id"])
 
     def test_all_packaged_policies_load(self):
         for policy in (
@@ -95,8 +97,7 @@ class TestSelectorRouter(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "selector_class"):
             SelectorRouter(self.servers, {})
 
-    def test_legacy_release_remains_fifo_not_request_exact(self):
-        # Characterize the known source limitation; this is not a correctness claim.
+    def test_out_of_order_release_returns_the_finished_request_weight(self):
         self.router = SelectorRouter(
             {"d": object()},
             {
@@ -107,7 +108,76 @@ class TestSelectorRouter(unittest.TestCase):
         self.router.acquire_server("long", [0] * 10000)
         self.router.acquire_server("short", [0] * 1000)
         self.router.release_server("d", "short")
-        self.assertEqual(self.router.get_total_inflight(), 1000)  # True outstanding weight would be 10000.
+        self.assertEqual(self.router.get_total_inflight(), 10000)
+        self.router.release_server("d", "long")
+        self.assertEqual(self.router.get_total_inflight(), 0)
+
+    def test_same_session_uses_distinct_reservations(self):
+        long_id, _ = self.router.acquire_server("session", [0] * 10000, reservation_id="long")
+        short_id, _ = self.router.acquire_server("session", [0] * 1000, reservation_id="short")
+        self.assertEqual(long_id, short_id)
+        self.router.release_server(short_id, "session", reservation_id="short")
+        self.assertEqual(self.router.get_total_inflight(), 10000)
+        self.router.release_server(long_id, "session", reservation_id="long")
+        self.assertEqual(self.router.get_total_inflight(), 0)
+
+    def test_duplicate_or_unknown_release_does_not_release_another_request(self):
+        first, _ = self.router.acquire_server("session", [1, 2], reservation_id="first")
+        second, _ = self.router.acquire_server("session", [3], reservation_id="second")
+        self.router.release_server(first, reservation_id="first")
+        self.router.release_server(first, reservation_id="first")
+        self.router.release_server(second, reservation_id="unknown")
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.router.release_server(second, reservation_id="second")
+        self.assertEqual(self.router.get_total_inflight(), 0)
+
+    def test_duplicate_acquire_is_rejected_before_incrementing_load(self):
+        self.router.acquire_server("same", [1, 2])
+        with self.assertRaisesRegex(ValueError, "already active"):
+            self.router.acquire_server("same", [3, 4, 5])
+        self.assertEqual(self.router.get_total_inflight(), 2)
+
+    def test_zero_token_release_does_not_consume_a_nonempty_request(self):
+        first, _ = self.router.acquire_server("session", [1, 2, 3], reservation_id="nonempty")
+        empty, _ = self.router.acquire_server("session", [], reservation_id="empty")
+        self.router.release_server(empty, reservation_id="empty")
+        self.assertEqual(self.router.get_total_inflight(), 3)
+        self.router.release_server(first, reservation_id="nonempty")
+        self.assertEqual(self.router.get_total_inflight(), 0)
+
+    def test_wrong_server_release_keeps_the_reservation(self):
+        server_id, _ = self.router.acquire_server("request", [1, 2])
+        wrong_id = next(key for key in self.servers if key != server_id)
+        with self.assertRaisesRegex(ValueError, "belongs to"):
+            self.router.release_server(wrong_id, "request")
+        self.assertEqual(self.router.get_total_inflight(), 2)
+        self.router.release_server(server_id, "request")
+        self.assertEqual(self.router.get_total_inflight(), 0)
+
+    def test_pool_membership_requires_drain_and_preserves_pending_state(self):
+        server_id, _ = self.router.acquire_server("request", [1, 2])
+        with self.assertRaisesRegex(RuntimeError, "drain"):
+            self.router.add_servers({"new": object()})
+        with self.assertRaisesRegex(RuntimeError, "drain"):
+            self.router.remove_servers([server_id])
+        self.assertEqual(self.router.get_all_servers(), list(self.servers))
+        self.router.clear_sticky_cache()
+        self.router.release_server(server_id, "request")
+        self.router.add_servers({"new": object()})
+        self.router.remove_servers([server_id])
+        self.assertEqual(self.router.get_total_inflight(), 0)
+
+    def test_duplicate_release_is_also_idempotent_for_request_count_policy(self):
+        router = SelectorRouter(
+            {"d": object()}, {"selector_class": "uni_agent.rollout.decode_selectors.LeastLoadDecodeSelector"}
+        )
+        router.acquire_server("one", [1])
+        router.acquire_server("two", [2])
+        router.release_server("d", "one")
+        router.release_server("d", "one")
+        self.assertEqual(router.get_total_inflight(), 1)
+        router.release_server("d", "two")
+        self.assertEqual(router.get_total_inflight(), 0)
 
 
 if __name__ == "__main__":

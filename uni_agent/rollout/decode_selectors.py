@@ -553,6 +553,7 @@ class SessionStickyDecodeSelector:
         self._candidate_keys: tuple[str, ...] = ()
         self._pending_tokens: list[int] = []
         self._inflight: list[deque[int]] = []
+        self._request_weights: dict[str, tuple[int, int]] = {}
         self._last_log = 0.0
         self.stats = {"sticky": 0, "rebalance": 0, "overload_all": 0, "no_key": 0}
 
@@ -562,14 +563,19 @@ class SessionStickyDecodeSelector:
         if not candidates:
             raise ValueError("no decode candidates available")
 
+        payload = req if isinstance(req, dict) else {}
+        reservation_id = payload.get("reservation_id")
+        if reservation_id is not None and reservation_id in self._request_weights:
+            raise ValueError(f"reservation {reservation_id!r} is already active")
         candidate_keys = tuple(candidate.key for candidate in candidates)
         if candidate_keys != self._candidate_keys:
+            if self._request_weights:
+                raise RuntimeError("drain active reservations before changing decode candidates")
             self._candidate_keys = candidate_keys
             self._pending_tokens = [0] * len(candidates)
             self._inflight = [deque() for _ in candidates]
         self._pressure.observe(candidate_keys)
 
-        payload = req if isinstance(req, dict) else {}
         prompt_ids = payload.get("prompt_ids") or []
         tokens = len(prompt_ids)
         sticky_key = payload.get("routing_key") or payload.get("request_id")
@@ -593,17 +599,32 @@ class SessionStickyDecodeSelector:
             selected = min(pool, key=lambda i: (self._pending_tokens[i], scores[i], i))
             self.stats["no_key"] += 1
 
-        if tokens:
-            self._pending_tokens[selected] += tokens
+        self._pending_tokens[selected] += tokens
+        if reservation_id is not None:
+            self._request_weights[reservation_id] = (selected, tokens)
+        elif tokens:
+            # Legacy direct callers without identity retain index/FIFO release.
+            # SelectorRouter always supplies identity and uses release_request.
             self._inflight[selected].append(tokens)
         self._maybe_log(scores, hot)
         return candidates[selected]
 
     def release(self, index: int) -> None:
-        """Give back the token weight of a finished request (FIFO per replica)."""
+        """Legacy FIFO release, only for direct selects without reservation_id."""
         if 0 <= index < len(self._inflight) and self._inflight[index]:
             weight = self._inflight[index].popleft()
             self._pending_tokens[index] = max(0, self._pending_tokens[index] - weight)
+
+    def release_request(self, index: int, reservation_id: str) -> None:
+        """Return exactly this request's prompt weight, independent of completion order."""
+        reservation = self._request_weights.get(reservation_id)
+        if reservation is None:
+            return
+        owner, weight = reservation
+        if owner != index:
+            raise ValueError(f"reservation {reservation_id!r} belongs to candidate {owner}, not {index}")
+        del self._request_weights[reservation_id]
+        self._pending_tokens[index] -= weight
 
     def reset(self) -> None:
         """Called by verl on weight update / sleep / wake / cache clear.

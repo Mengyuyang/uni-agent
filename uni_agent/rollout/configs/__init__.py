@@ -1,1 +1,1 @@
-"""PD decode-node selector plugin configs (package for pkg:// resource loading)."""
+"""Packaged PD selector YAMLs; pass their filesystem paths to verl's router loader."""

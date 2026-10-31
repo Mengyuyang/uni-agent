@@ -26,40 +26,66 @@ class SelectorRouter:
         self._selector = _load_class(str(selector_class))(**selector_kwargs)
         self._servers = dict(servers)
         self._order = list(self._servers)
+        self._reservations: dict[str, str] = {}
 
     def require_acquire_fields(self) -> list[str]:
-        return ["prompt_ids"]
+        return ["prompt_ids", "reservation_id"]
 
     def require_release_fields(self) -> list[str]:
-        return ["request_id"]
+        return ["request_id", "reservation_id"]
 
     def acquire_server(
         self,
         request_id: str,
         prompt_ids: list[int] | None = None,
+        reservation_id: str | None = None,
     ) -> tuple[str, Any]:
+        # request_id remains the session-affinity key. PD supplies a separate
+        # per-call identity; other callers must use unique active request IDs.
+        identity = reservation_id if reservation_id is not None else request_id
+        if identity in self._reservations:
+            raise ValueError(f"reservation {identity!r} is already active")
         candidates = [DecodeCandidate(key=key, handle=self._servers[key]) for key in self._order]
         selected = self._selector.select(
-            {"routing_key": request_id, "prompt_ids": prompt_ids},
+            {"routing_key": request_id, "prompt_ids": prompt_ids, "reservation_id": identity},
             candidates,
         )
         server_id = str(getattr(selected, "key", selected))
         if server_id not in self._servers:
             raise RuntimeError(f"selector returned unknown server: {server_id!r}")
+        self._reservations[identity] = server_id
         return server_id, self._servers[server_id]
 
-    def release_server(self, server_id: str, request_id: str | None = None) -> None:
-        release = getattr(self._selector, "release", None)
-        if callable(release) and server_id in self._order:
-            release(self._order.index(server_id))
+    def release_server(self, server_id: str, request_id: str | None = None, reservation_id: str | None = None) -> None:
+        identity = reservation_id if reservation_id is not None else request_id
+        if identity is None:
+            raise ValueError("release requires reservation_id or a unique request_id")
+        reserved_server = self._reservations.get(identity)
+        if reserved_server is None:
+            return  # A duplicate/late release must not decrement someone else's load.
+        if reserved_server != server_id:
+            raise ValueError(f"reservation {identity!r} belongs to {reserved_server!r}, not {server_id!r}")
+        index = self._order.index(server_id)
+        release_request = getattr(self._selector, "release_request", None)
+        if callable(release_request):
+            release_request(index, identity)
+        else:
+            release = getattr(self._selector, "release", None)
+            if callable(release):
+                release(index)
+        del self._reservations[identity]
 
     def add_servers(self, servers: dict[str, Any]) -> None:
+        if self._reservations and any(key not in self._servers for key in servers):
+            raise RuntimeError("drain active reservations before changing the selector server pool")
         for server_id, handle in servers.items():
             if server_id not in self._servers:
                 self._servers[server_id] = handle
                 self._order.append(server_id)
 
     def remove_servers(self, server_ids: list[str]) -> None:
+        if self._reservations and any(key in self._servers for key in server_ids):
+            raise RuntimeError("drain active reservations before changing the selector server pool")
         for server_id in server_ids:
             self._servers.pop(server_id, None)
             if server_id in self._order:
