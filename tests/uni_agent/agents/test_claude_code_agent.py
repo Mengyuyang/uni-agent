@@ -166,6 +166,7 @@ def test_run_forwards_workdir(system_contents, expected_system_prompt):
     assert len(sandbox.exec_calls) == 1
     assert sandbox.exec_calls[0]["workdir"] == "/testbed"
     assert sandbox.exec_calls[0]["timeout"] == 123.0
+    assert sandbox.exec_calls[0]["env"]["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "123000"
     argv = sandbox.exec_calls[0]["argv"]
     assert argv[:2] == ["claude", "-p"]
     assert argv[2] == "fix the bug"
@@ -313,6 +314,26 @@ def test_claude_env_pins_enabled_subagents_to_policy_model(enable_subagents, exp
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("enable_subagents", [False, True])
+def test_cli_model_name_overrides_policy_name_for_claude_cli(enable_subagents):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(model_name="Qwen3.5-9B"),
+        cli_model_name="sonnet",
+        enable_subagents=enable_subagents,
+    )
+    agent = ClaudeCodeAgent(config)
+
+    argv = agent._claude_argv("fix the bug")
+    env = agent._claude_env("http://gateway:8000")
+
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert env["ANTHROPIC_MODEL"] == "sonnet"
+    assert env.get("CLAUDE_CODE_SUBAGENT_MODEL") == ("sonnet" if enable_subagents else None)
+    assert config.model.model_name == "Qwen3.5-9B"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_claude_argv_can_keep_slash_commands_enabled():
     config = ClaudeCodeConfig(
         model=ModelConfig(model_name="policy"),
@@ -356,3 +377,52 @@ def test_claude_env_uses_placeholders_for_session_gateway():
     assert "ANTHROPIC_API_KEY" not in env
     assert env["ANTHROPIC_AUTH_TOKEN"]
     assert env["ANTHROPIC_AUTH_TOKEN"] != "EMPTY"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("cli_model_name", [None, ""])
+def test_cli_model_name_defaults_to_policy_model(cli_model_name):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(model_name="policy"),
+        cli_model_name=cli_model_name,
+        enable_subagents=True,
+    )
+    agent = ClaudeCodeAgent(config)
+
+    argv = agent._claude_argv("fix the bug")
+    env = agent._claude_env("http://gateway:8000")
+
+    assert argv[argv.index("--model") + 1] == "policy"
+    assert env["ANTHROPIC_MODEL"] == "policy"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "policy"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("run_timeout", "extra_env", "expected_timeout"),
+    [
+        (1800.0, {}, "1800000"),
+        (4800.0, {}, "4800000"),
+        (123.456, {}, "123456"),
+        (4800.0, {"CLAUDE_STREAM_IDLE_TIMEOUT_MS": "1200000"}, "1200000"),
+    ],
+)
+def test_run_passes_stream_idle_timeout_to_sandbox(run_timeout, extra_env, expected_timeout):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
+        run_timeout=run_timeout,
+        extra_env=extra_env,
+    )
+    sandbox = _FakeSandbox(probe_results=[0])
+
+    asyncio.run(
+        ClaudeCodeAgent(config).run(
+            sandbox=sandbox,
+            messages=[{"role": "user", "content": "fix the bug"}],
+        )
+    )
+
+    assert sandbox.exec_calls[0]["env"]["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == expected_timeout
+    assert sandbox.exec_calls[0]["timeout"] == run_timeout
