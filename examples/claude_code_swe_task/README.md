@@ -11,6 +11,8 @@ provider-independent `sandbox.executable_paths` setting.
 - `build_tool.sh`: builds and optionally pushes the sidecar image.
 - `task_config_claude_code_openyuanrong.yaml`: configures the agent and the
   OpenYuanrong sandboxes.
+- `runtime_env_openyuanrong.example.yaml`: tunnel timeout fragment to merge into
+  the Ray runtime environment used by the launcher.
 - `run_train.sh`: launches the two-node Ascend Qwen3.5-9B GRPO recipe.
 
 ## Build the tool image
@@ -83,3 +85,44 @@ This override leaves the outer sandbox execution timeout at `run_timeout`.
 The setting is passed to the Claude Code process; whether it is honored depends
 on the installed CLI version. It does not configure the OpenYuanrong tunnel
 client/server timeout (`YR_TUNNEL_HTTP_TIMEOUT`) or the task evaluation timeout.
+
+## OpenYuanrong tunnel timeout on both sides
+
+The SWE-bench and SWE-reBench task entries set the sandbox-side HTTP response
+timeout to 1200 seconds at sandbox creation:
+
+```yaml
+sandbox:
+  sandbox_kwargs:
+    env:
+      YR_TUNNEL_HTTP_TIMEOUT: "1200"
+```
+
+Set the same value for the caller-side TunnelClient by merging
+`runtime_env_openyuanrong.example.yaml` into the `env_vars` mapping of your
+existing Ray runtime YAML:
+
+```yaml
+env_vars:
+  YR_TUNNEL_HTTP_TIMEOUT: "1200"
+```
+
+Preserve the runtime file's existing dependencies, connection settings,
+credentials, and other environment variables. The example is a fragment, not a
+complete deployment configuration. Point `RUNTIME_ENV` at the merged file when
+launching `run_train.sh`; the launcher does not load this fragment automatically.
+Ray then supplies the client setting to workers on both nodes. Exporting the
+variable only in the launch shell, or putting it only in `agent.extra_env`, does
+not configure both tunnel endpoints.
+
+The sandbox value must be supplied before its runtime starts. Start a new job
+with the merged runtime configuration and create fresh sandboxes; updating the
+YAML does not reconfigure already running clients or sandboxes. With a supporting
+sandbox runtime, verify the parsed server value in its startup log
+(`http_timeout_seconds=1200`). Seeing the variable in a process environment alone
+does not prove that its runtime version honors it.
+
+This tunnel setting uses seconds. It is separate from Claude Code's
+`CLAUDE_STREAM_IDLE_TIMEOUT_MS` (milliseconds), `agent.run_timeout`, and the task
+evaluation timeout. Increasing it permits longer waits; it does not add sandbox
+capacity or fix a disconnected or stalled upstream service.

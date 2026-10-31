@@ -15,6 +15,9 @@
       claude: /opt/claude-code/bin/claude
     sandbox_kwargs:
       proxy_port: 38197
+      # Sandbox-side tunnel response timeout, in seconds (set at creation).
+      env:
+        YR_TUNNEL_HTTP_TIMEOUT: "1200"
   agent:
     name: claude_code
     max_turns: 200
@@ -46,6 +49,9 @@
       claude: /opt/claude-code/bin/claude
     sandbox_kwargs:
       proxy_port: 38197
+      # Sandbox-side tunnel response timeout, in seconds (set at creation).
+      env:
+        YR_TUNNEL_HTTP_TIMEOUT: "1200"
   agent:
     name: claude_code
     max_turns: 200

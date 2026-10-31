@@ -1,0 +1,7 @@
+# Merge this fragment into the Ray runtime YAML selected by RUNTIME_ENV.
+# Preserve the existing SDK dependencies, connection settings, and credentials.
+# Ray passes env_vars to job workers on every node; a local export is not enough.
+# This sets the caller-side TunnelClient HTTP response timeout, in seconds.
+# The matching sandbox-side value is in task_config_claude_code_openyuanrong.yaml.
+env_vars:
+  YR_TUNNEL_HTTP_TIMEOUT: "1200"
