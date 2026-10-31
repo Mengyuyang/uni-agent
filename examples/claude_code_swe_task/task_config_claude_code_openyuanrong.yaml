@@ -15,14 +15,18 @@
       claude: /opt/claude-code/bin/claude
     sandbox_kwargs:
       proxy_port: 38197
-      # Sandbox-side tunnel response timeout, in seconds (set at creation).
-      env:
-        YR_TUNNEL_HTTP_TIMEOUT: "1200"
+      # Preserve the image PATH while preferring the mounted CLI and testbed tools.
+      add_to_path:
+        - /opt/claude-code/bin
+        - /opt/miniconda3/envs/testbed/bin
+        - /opt/miniconda3/bin
   agent:
     name: claude_code
     max_turns: 200
     run_timeout: 4800
     extra_env:
+      CONDA_PREFIX: /opt/miniconda3/envs/testbed
+      CONDA_DEFAULT_ENV: testbed
       CLAUDE_CODE_MAX_CONTEXT_TOKENS: "136000"
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: "120000"
   prompt_template: &swe_claude_prompt
@@ -49,14 +53,18 @@
       claude: /opt/claude-code/bin/claude
     sandbox_kwargs:
       proxy_port: 38197
-      # Sandbox-side tunnel response timeout, in seconds (set at creation).
-      env:
-        YR_TUNNEL_HTTP_TIMEOUT: "1200"
+      # Preserve the image PATH while preferring the mounted CLI and testbed tools.
+      add_to_path:
+        - /opt/claude-code/bin
+        - /opt/miniconda3/envs/testbed/bin
+        - /opt/miniconda3/bin
   agent:
     name: claude_code
     max_turns: 200
     run_timeout: 4800
     extra_env:
+      CONDA_PREFIX: /opt/miniconda3/envs/testbed
+      CONDA_DEFAULT_ENV: testbed
       CLAUDE_CODE_MAX_CONTEXT_TOKENS: "136000"
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: "120000"
   prompt_template: *swe_claude_prompt

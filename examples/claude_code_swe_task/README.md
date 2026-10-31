@@ -11,8 +11,6 @@ provider-independent `sandbox.executable_paths` setting.
 - `build_tool.sh`: builds and optionally pushes the sidecar image.
 - `task_config_claude_code_openyuanrong.yaml`: configures the agent and the
   OpenYuanrong sandboxes.
-- `runtime_env_openyuanrong.example.yaml`: tunnel timeout fragment to merge into
-  the Ray runtime environment used by the launcher.
 - `run_train.sh`: launches the two-node Ascend Qwen3.5-9B GRPO recipe.
 
 ## Build the tool image
@@ -86,43 +84,34 @@ The setting is passed to the Claude Code process; whether it is honored depends
 on the installed CLI version. It does not configure the OpenYuanrong tunnel
 client/server timeout (`YR_TUNNEL_HTTP_TIMEOUT`) or the task evaluation timeout.
 
-## OpenYuanrong tunnel timeout on both sides
+## Use the task image's testbed Conda environment
 
-The SWE-bench and SWE-reBench task entries set the sandbox-side HTTP response
-timeout to 1200 seconds at sandbox creation:
+Both task entries configure the existing `testbed` environment used by the
+SWE images. The OpenYuanrong provider prepends these directories to the image's
+existing PATH for command execution and persistent shells:
 
 ```yaml
 sandbox:
   sandbox_kwargs:
-    env:
-      YR_TUNNEL_HTTP_TIMEOUT: "1200"
+    add_to_path:
+      - /opt/claude-code/bin
+      - /opt/miniconda3/envs/testbed/bin
+      - /opt/miniconda3/bin
+agent:
+  extra_env:
+    CONDA_PREFIX: /opt/miniconda3/envs/testbed
+    CONDA_DEFAULT_ENV: testbed
 ```
 
-Set the same value for the caller-side TunnelClient by merging
-`runtime_env_openyuanrong.example.yaml` into the `env_vars` mapping of your
-existing Ray runtime YAML:
+The first directory supplies the mounted Claude CLI. The next two let Claude
+and its child processes resolve `python`, `pip`, `pytest`, and `conda` from the
+intended environment when those executables are installed there. The original
+PATH is retained so image-provided system tools remain available.
 
-```yaml
-env_vars:
-  YR_TUNNEL_HTTP_TIMEOUT: "1200"
-```
-
-Preserve the runtime file's existing dependencies, connection settings,
-credentials, and other environment variables. The example is a fragment, not a
-complete deployment configuration. Point `RUNTIME_ENV` at the merged file when
-launching `run_train.sh`; the launcher does not load this fragment automatically.
-Ray then supplies the client setting to workers on both nodes. Exporting the
-variable only in the launch shell, or putting it only in `agent.extra_env`, does
-not configure both tunnel endpoints.
-
-The sandbox value must be supplied before its runtime starts. Start a new job
-with the merged runtime configuration and create fresh sandboxes; updating the
-YAML does not reconfigure already running clients or sandboxes. With a supporting
-sandbox runtime, verify the parsed server value in its startup log
-(`http_timeout_seconds=1200`). Seeing the variable in a process environment alone
-does not prove that its runtime version honors it.
-
-This tunnel setting uses seconds. It is separate from Claude Code's
-`CLAUDE_STREAM_IDLE_TIMEOUT_MS` (milliseconds), `agent.run_timeout`, and the task
-evaluation timeout. Increasing it permits longer waits; it does not add sandbox
-capacity or fix a disconnected or stalled upstream service.
+`CONDA_PREFIX` and `CONDA_DEFAULT_ENV` describe the environment for Claude and
+its child processes; setting them alone does not select a Python interpreter.
+The PATH entries provide that selection. This configuration neither creates a
+Conda environment nor runs its activation hooks. If a task image uses a
+different installation path or environment name, update the paths and the two
+variables together. The reward evaluator keeps its existing explicit Conda
+activation independently of the Claude process environment.
