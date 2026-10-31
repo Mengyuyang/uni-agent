@@ -49,7 +49,7 @@ step, 8 responses per prompt, TP2/PP2/CP8 for training, and TP2 rollout replicas
 These defaults remain overridable through the environment variables defined at
 the top of `run_train.sh`.
 
-## Claude CLI model name and stream timeout
+## Claude CLI model name
 
 Set `cli_model_name` in the task's `agent` configuration when Claude Code needs
 a model name or alias different from the policy model name:
@@ -60,7 +60,6 @@ agent:
   model:
     model_name: Qwen3.5-9B
   cli_model_name: sonnet
-  run_timeout: 4800
 ```
 
 This example assumes the configured gateway accepts the `sonnet` alias and
@@ -68,21 +67,6 @@ routes it to the intended policy. The override sets the CLI's `--model`,
 `ANTHROPIC_MODEL`, and, when subagents are enabled, `CLAUDE_CODE_SUBAGENT_MODEL`.
 It does not change `agent.model.model_name` or load a different policy model.
 If the override is omitted or empty, all three use `model.model_name` as before.
-
-The agent also sets `CLAUDE_STREAM_IDLE_TIMEOUT_MS` to `run_timeout * 1000`
-(integer milliseconds), aligning the CLI stream watchdog with the outer
-execution budget. For the example above, the value is `4800000`.
-To use a different CLI idle timeout, add this under `agent`:
-
-```yaml
-extra_env:
-  CLAUDE_STREAM_IDLE_TIMEOUT_MS: "1200000"
-```
-
-This override leaves the outer sandbox execution timeout at `run_timeout`.
-The setting is passed to the Claude Code process; whether it is honored depends
-on the installed CLI version. It does not configure the OpenYuanrong tunnel
-client/server timeout (`YR_TUNNEL_HTTP_TIMEOUT`) or the task evaluation timeout.
 
 ## Use the task image's testbed Conda environment
 

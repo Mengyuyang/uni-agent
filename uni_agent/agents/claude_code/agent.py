@@ -228,9 +228,6 @@ class ClaudeCodeAgent(Agent):
             "API_TIMEOUT_MS": "86400000",  # 24 hours
             "API_FORCE_IDLE_TIMEOUT": "0",
             "CLAUDE_CODE_MAX_RETRIES": "0",
-            # Keep the CLI stream watchdog within the outer execution budget.
-            # extra_env can override this independently of the sandbox timeout.
-            "CLAUDE_STREAM_IDLE_TIMEOUT_MS": str(int(cfg.run_timeout * 1000)),
             "NO_PROXY": "*",
             "no_proxy": "*",
             "HTTP_PROXY": "",

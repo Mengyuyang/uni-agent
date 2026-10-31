@@ -166,7 +166,6 @@ def test_run_forwards_workdir(system_contents, expected_system_prompt):
     assert len(sandbox.exec_calls) == 1
     assert sandbox.exec_calls[0]["workdir"] == "/testbed"
     assert sandbox.exec_calls[0]["timeout"] == 123.0
-    assert sandbox.exec_calls[0]["env"]["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "123000"
     argv = sandbox.exec_calls[0]["argv"]
     assert argv[:2] == ["claude", "-p"]
     assert argv[2] == "fix the bug"
@@ -396,33 +395,3 @@ def test_cli_model_name_defaults_to_policy_model(cli_model_name):
     assert argv[argv.index("--model") + 1] == "policy"
     assert env["ANTHROPIC_MODEL"] == "policy"
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "policy"
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-@pytest.mark.parametrize(
-    ("run_timeout", "extra_env", "expected_timeout"),
-    [
-        (1800.0, {}, "1800000"),
-        (4800.0, {}, "4800000"),
-        (123.456, {}, "123456"),
-        (4800.0, {"CLAUDE_STREAM_IDLE_TIMEOUT_MS": "1200000"}, "1200000"),
-    ],
-)
-def test_run_passes_stream_idle_timeout_to_sandbox(run_timeout, extra_env, expected_timeout):
-    config = ClaudeCodeConfig(
-        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
-        run_timeout=run_timeout,
-        extra_env=extra_env,
-    )
-    sandbox = _FakeSandbox(probe_results=[0])
-
-    asyncio.run(
-        ClaudeCodeAgent(config).run(
-            sandbox=sandbox,
-            messages=[{"role": "user", "content": "fix the bug"}],
-        )
-    )
-
-    assert sandbox.exec_calls[0]["env"]["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == expected_timeout
-    assert sandbox.exec_calls[0]["timeout"] == run_timeout
