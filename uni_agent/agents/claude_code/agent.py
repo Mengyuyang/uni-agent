@@ -25,9 +25,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_CLAUDE_NPM_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code --no-audit --no-fund"
+_CLAUDE_MOUNTED_INSTALL_PREFIX = r"""
+set -euo pipefail
+claude_bin="/opt/claude-code/bin/claude"
+if [ -x "${claude_bin}" ]; then
+  ln -sfn "${claude_bin}" /usr/bin/claude
+  exit 0
+fi
+""".strip()
+
+_CLAUDE_NPM_INSTALL_COMMAND = (
+    _CLAUDE_MOUNTED_INSTALL_PREFIX + "\n" + "npm install -g @anthropic-ai/claude-code --no-audit --no-fund"
+)
 _CLAUDE_NATIVE_INSTALL_COMMAND = r"""
 set -euo pipefail
+claude_bin="/opt/claude-code/bin/claude"
+if [ -x "${claude_bin}" ]; then
+  ln -sfn "${claude_bin}" /usr/bin/claude
+  exit 0
+fi
 if command -v curl >/dev/null 2>&1; then
   curl -fsSL https://claude.ai/install.sh
 elif command -v wget >/dev/null 2>&1; then

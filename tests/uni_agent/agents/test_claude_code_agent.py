@@ -53,6 +53,14 @@ def _agent() -> ClaudeCodeAgent:
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_install_commands_prefer_mounted_claude_binary():
+    for command in (_CLAUDE_NPM_INSTALL_COMMAND, _CLAUDE_NATIVE_INSTALL_COMMAND):
+        assert "/opt/claude-code/bin/claude" in command
+        assert 'ln -sfn "${claude_bin}" /usr/bin/claude' in command
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_skips_install_when_already_available(caplog):
     sandbox = _FakeSandbox(probe_results=[0])
     caplog.set_level(logging.INFO, logger="uni_agent.agents.claude_code.agent")
