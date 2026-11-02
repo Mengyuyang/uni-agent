@@ -48,3 +48,54 @@ The launcher defaults to the validated two-node configuration: 64 prompts per
 step, 8 responses per prompt, TP2/PP2/CP8 for training, and TP2 rollout replicas.
 These defaults remain overridable through the environment variables defined at
 the top of `run_train.sh`.
+
+## Claude CLI model name
+
+Set `cli_model_name` in the task's `agent` configuration when Claude Code needs
+a model name or alias different from the policy model name:
+
+```yaml
+agent:
+  name: claude_code
+  model:
+    model_name: Qwen3.5-9B
+  cli_model_name: sonnet
+```
+
+This example assumes the configured gateway accepts the `sonnet` alias and
+routes it to the intended policy. The override sets the CLI's `--model`,
+`ANTHROPIC_MODEL`, and, when subagents are enabled, `CLAUDE_CODE_SUBAGENT_MODEL`.
+It does not change `agent.model.model_name` or load a different policy model.
+If the override is omitted or empty, all three use `model.model_name` as before.
+
+## Use the task image's testbed Conda environment
+
+Both task entries configure the existing `testbed` environment used by the
+SWE images. The OpenYuanrong provider prepends these directories to the image's
+existing PATH for command execution and persistent shells:
+
+```yaml
+sandbox:
+  sandbox_kwargs:
+    add_to_path:
+      - /opt/claude-code/bin
+      - /opt/miniconda3/envs/testbed/bin
+      - /opt/miniconda3/bin
+agent:
+  extra_env:
+    CONDA_PREFIX: /opt/miniconda3/envs/testbed
+    CONDA_DEFAULT_ENV: testbed
+```
+
+The first directory supplies the mounted Claude CLI. The next two let Claude
+and its child processes resolve `python`, `pip`, `pytest`, and `conda` from the
+intended environment when those executables are installed there. The original
+PATH is retained so image-provided system tools remain available.
+
+`CONDA_PREFIX` and `CONDA_DEFAULT_ENV` describe the environment for Claude and
+its child processes; setting them alone does not select a Python interpreter.
+The PATH entries provide that selection. This configuration neither creates a
+Conda environment nor runs its activation hooks. If a task image uses a
+different installation path or environment name, update the paths and the two
+variables together. The reward evaluator keeps its existing explicit Conda
+activation independently of the Claude process environment.
