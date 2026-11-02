@@ -18,7 +18,7 @@ from uni_agent.gateway.utils import normalize_tool_arguments
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
-from verl.utils.tokenizer.continuous_token import VLContinuousTokenMixin
+from verl.utils.tokenizer.continuous_token import MergeResult, VLContinuousTokenMixin
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
@@ -165,6 +165,16 @@ class MessageCodec:
     ):
         self._tokenizer = tokenizer
         self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
+        normalized_model_type = (hf_model_type or "").strip().lower()
+        reasoning_effort = self._apply_chat_template_kwargs.get("reasoning_effort")
+        deepseek_v4_thinking = (
+            normalized_model_type == "deepseek_v4"
+            and bool(
+                self._apply_chat_template_kwargs.get("enable_thinking")
+                or self._apply_chat_template_kwargs.get("thinking")
+            )
+            and reasoning_effort != "none"
+        )
         self._mm_processor_kwargs = dict(mm_processor_kwargs or {})
         self._continuous_token_builder = create_continuous_token_builder(
             tokenizer,
@@ -177,7 +187,11 @@ class MessageCodec:
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         processing_class = processor if processor is not None else tokenizer
-        if hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
+        if normalized_model_type == "deepseek_v4":
+            generation_prompt = "<｜Assistant｜>" + ("<think>" if deepseek_v4_thinking else "</think>")
+            self._generation_prompt = normalize_token_ids(tokenizer.encode(generation_prompt, add_special_tokens=False))
+            self._turn_separator = []
+        elif hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
             self._generation_prompt = []
             self._turn_separator = []
         else:
@@ -277,16 +291,18 @@ class MessageCodec:
         self,
         runtime_token_ids: list[int],
         assistant_token_ids: list[int],
-        response_mask: list[int],
+        response_mask: list[int] | None = None,
         response_logprobs: list[float] | None = None,
         *,
         assistant_logprobs: list[float] | None = None,
-    ) -> tuple[list[int], list[int], list[float] | None]:
+    ) -> tuple[list[int], list[int], list[float] | None] | MergeResult:
         """Merge model-generated tokens and align response metadata."""
         merge_result = self._continuous_token_builder.merge_assistant_tokens(
             runtime_token_ids,
             assistant_token_ids,
         )
+        if response_mask is None:
+            return merge_result
         response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
             merge_result,
             response_mask,
@@ -321,13 +337,13 @@ class MessageCodec:
         previous_messages: list[dict[str, Any]],
         updated_messages: list[dict[str, Any]],
         runtime_token_ids: list[int],
-        response_mask: list[int],
+        response_mask: list[int] | None = None,
         response_logprobs: list[float] | None = None,
         *,
         tools: list[dict[str, Any]] | None = None,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
-    ) -> tuple[list[int], list[int], list[float] | None]:
+    ) -> tuple[list[int], list[int], list[float] | None] | MergeResult:
         """Merge prepared context and align response metadata.
 
         image_data covers all updated_messages, including history, in block order.
@@ -364,6 +380,8 @@ class MessageCodec:
                 runtime_token_ids,
                 tools=tools,
             )
+        if response_mask is None:
+            return merge_result
         response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
             merge_result,
             response_mask,
