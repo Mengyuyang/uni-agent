@@ -41,9 +41,11 @@ class TestSelectorRouter(unittest.TestCase):
         )
         self.assertEqual(first_id, second_id)
         self.assertIs(first_handle, second_handle)
-        self.assertEqual(self.router.get_total_inflight(), 64)
+        self.assertEqual(self.router.get_total_inflight(), 2)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 64)
         self.router.release_server(first_id, "session-a", reservation_id="turn-1")
-        self.assertEqual(self.router.get_total_inflight(), 32)
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 32)
 
     def test_server_pool_can_be_updated(self):
         new_handle = object()
@@ -84,14 +86,20 @@ class TestSelectorRouter(unittest.TestCase):
                 if policy == "session_sticky":
                     config["pressure_cache"] = _NoPressure()
                 router = SelectorRouter(self.servers, config)
+                self.assertEqual(router.get_total_inflight(), 0)
                 server_id, handle = router.acquire_server("test-session", [1, 2, 3])
                 self.assertIs(handle, self.servers[server_id])
+                self.assertEqual(router.get_total_inflight(), 1)
+                expected_tokens = 3 if policy == "session_sticky" else None
+                self.assertEqual(router.get_status()["pending_prompt_tokens"], expected_tokens)
                 router.release_server(server_id, "test-session")
+                self.assertEqual(router.get_total_inflight(), 0)
 
     def test_reset_preserves_pending_tokens(self):
         self.router.acquire_server("a", [1, 2, 3])
         self.router.clear_sticky_cache()
-        self.assertEqual(self.router.get_total_inflight(), 3)
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 3)
 
     def test_missing_selector_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "selector_class"):
@@ -108,7 +116,8 @@ class TestSelectorRouter(unittest.TestCase):
         self.router.acquire_server("long", [0] * 10000)
         self.router.acquire_server("short", [0] * 1000)
         self.router.release_server("d", "short")
-        self.assertEqual(self.router.get_total_inflight(), 10000)
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 10000)
         self.router.release_server("d", "long")
         self.assertEqual(self.router.get_total_inflight(), 0)
 
@@ -117,7 +126,8 @@ class TestSelectorRouter(unittest.TestCase):
         short_id, _ = self.router.acquire_server("session", [0] * 1000, reservation_id="short")
         self.assertEqual(long_id, short_id)
         self.router.release_server(short_id, "session", reservation_id="short")
-        self.assertEqual(self.router.get_total_inflight(), 10000)
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 10000)
         self.router.release_server(long_id, "session", reservation_id="long")
         self.assertEqual(self.router.get_total_inflight(), 0)
 
@@ -135,13 +145,16 @@ class TestSelectorRouter(unittest.TestCase):
         self.router.acquire_server("same", [1, 2])
         with self.assertRaisesRegex(ValueError, "already active"):
             self.router.acquire_server("same", [3, 4, 5])
-        self.assertEqual(self.router.get_total_inflight(), 2)
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 2)
 
     def test_zero_token_release_does_not_consume_a_nonempty_request(self):
         first, _ = self.router.acquire_server("session", [1, 2, 3], reservation_id="nonempty")
         empty, _ = self.router.acquire_server("session", [], reservation_id="empty")
+        self.assertEqual(self.router.get_total_inflight(), 2)
         self.router.release_server(empty, reservation_id="empty")
-        self.assertEqual(self.router.get_total_inflight(), 3)
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 3)
         self.router.release_server(first, reservation_id="nonempty")
         self.assertEqual(self.router.get_total_inflight(), 0)
 
@@ -150,7 +163,8 @@ class TestSelectorRouter(unittest.TestCase):
         wrong_id = next(key for key in self.servers if key != server_id)
         with self.assertRaisesRegex(ValueError, "belongs to"):
             self.router.release_server(wrong_id, "request")
-        self.assertEqual(self.router.get_total_inflight(), 2)
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 2)
         self.router.release_server(server_id, "request")
         self.assertEqual(self.router.get_total_inflight(), 0)
 
@@ -178,6 +192,59 @@ class TestSelectorRouter(unittest.TestCase):
         self.assertEqual(router.get_total_inflight(), 1)
         router.release_server("d", "two")
         self.assertEqual(router.get_total_inflight(), 0)
+
+    def test_status_separates_requests_from_zero_and_nonzero_token_weights(self):
+        first, _ = self.router.acquire_server("session", [1, 2, 3], reservation_id="nonempty")
+        empty, _ = self.router.acquire_server("session", [], reservation_id="empty")
+        self.assertEqual(self.router.get_status()["total_inflight"], 2)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 3)
+        self.router.release_server(first, reservation_id="nonempty")
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 0)
+        self.router.release_server(empty, reservation_id="empty")
+        self.assertEqual(self.router.get_total_inflight(), 0)
+
+    def test_same_id_replacement_after_drain_uses_new_handle_and_resets_affinity(self):
+        first_handle, old_handle, new_handle = object(), object(), object()
+        router = SelectorRouter(
+            {"d0": first_handle, "d1": old_handle},
+            {"selector_class": "uni_agent.rollout.decode_selectors.CacheAwareDecodeSelector"},
+        )
+        self.assertEqual(router.acquire_server("busy", [9])[0], "d0")
+        self.assertEqual(router.acquire_server("warm", [1, 2, 3])[0], "d1")
+        router.release_server("d0", "busy")
+        router.release_server("d1", "warm")
+        router.add_servers({"d1": new_handle})
+        self.assertEqual(router.get_all_servers(), ["d0", "d1"])
+        # The replacement cannot inherit the old engine's prefix affinity.
+        server_id, handle = router.acquire_server("next", [1, 2, 3])
+        self.assertEqual(server_id, "d0")
+        self.assertIs(handle, first_handle)
+        replacement_id, replacement_handle = router.acquire_server("other", [4, 5])
+        self.assertEqual(replacement_id, "d1")
+        self.assertIs(replacement_handle, new_handle)
+        router.release_server(server_id, "next")
+        router.release_server(replacement_id, "other")
+        self.assertEqual(router.get_total_inflight(), 0)
+
+    def test_active_handle_replacement_rejects_the_entire_pool_update(self):
+        server_id, _ = self.router.acquire_server("request", [1, 2])
+        replacement = object()
+        with self.assertRaisesRegex(RuntimeError, "drain"):
+            self.router.add_servers({server_id: replacement, "new": object()})
+        self.assertEqual(self.router._servers, self.servers)
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.router.release_server(server_id, "request")
+        self.router.add_servers({server_id: replacement})
+        self.assertIs(self.router._servers[server_id], replacement)
+
+    def test_readding_the_same_handle_does_not_change_active_accounting(self):
+        server_id, handle = self.router.acquire_server("request", [1, 2])
+        self.router.add_servers({server_id: handle})
+        self.assertEqual(self.router.get_total_inflight(), 1)
+        self.assertEqual(self.router.get_status()["pending_prompt_tokens"], 2)
+        self.router.release_server(server_id, "request")
+        self.assertEqual(self.router.get_total_inflight(), 0)
 
 
 if __name__ == "__main__":

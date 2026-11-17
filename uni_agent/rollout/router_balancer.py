@@ -76,12 +76,16 @@ class SelectorRouter:
         del self._reservations[identity]
 
     def add_servers(self, servers: dict[str, Any]) -> None:
-        if self._reservations and any(key not in self._servers for key in servers):
+        replacements = any(key in self._servers and self._servers[key] != handle for key, handle in servers.items())
+        if self._reservations and (replacements or any(key not in self._servers for key in servers)):
             raise RuntimeError("drain active reservations before changing the selector server pool")
+        if replacements:
+            # A restarted engine no longer owns the old handle's estimated KV.
+            self.clear_sticky_cache()
         for server_id, handle in servers.items():
             if server_id not in self._servers:
-                self._servers[server_id] = handle
                 self._order.append(server_id)
+            self._servers[server_id] = handle
 
     def remove_servers(self, server_ids: list[str]) -> None:
         if self._reservations and any(key in self._servers for key in server_ids):
@@ -95,10 +99,14 @@ class SelectorRouter:
         return list(self._order)
 
     def get_status(self) -> dict[str, Any]:
+        pending_tokens = getattr(self._selector, "_pending_tokens", None)
         return {
             "selector": type(self._selector).__name__,
             "servers": list(self._order),
             "total_inflight": self.get_total_inflight(),
+            "pending_prompt_tokens": (
+                sum(int(value) for value in pending_tokens) if isinstance(pending_tokens, list) else None
+            ),
             "active_servers": len(self._order),
         }
 
@@ -109,10 +117,5 @@ class SelectorRouter:
         return {"cleared_entries": 0, "server_loads": {}}
 
     def get_total_inflight(self) -> int:
-        pending_tokens = getattr(self._selector, "_pending_tokens", None)
-        if isinstance(pending_tokens, list):
-            return sum(int(value) for value in pending_tokens)
-        pending_requests = getattr(self._selector, "_pending_requests", None)
-        if isinstance(pending_requests, list):
-            return sum(int(value) for value in pending_requests)
-        return 0
+        """Count active calls for every policy, including zero-token requests."""
+        return len(self._reservations)
