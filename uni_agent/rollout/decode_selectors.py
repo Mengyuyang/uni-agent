@@ -224,9 +224,10 @@ class _TokenRadixTree:
 class LeastLoadDecodeSelector:
     """Power-of-two choices over instance-local in-flight counters.
 
-    计数口径与原版 verl ``pd_routing.pending_requests`` 一致（纯本地、无 RPC）：
-    ``select`` 选中即 +1，verl 侧在请求结束时调用 ``release(index)`` 做 -1；
-    候选集合发生变化（含"同数量换成员"）时计数重置，避免索引错位。
+    ``select`` increments the chosen candidate's local count; the caller uses
+    ``release(index)`` to decrement it on completion. No load RPC is required.
+    Changing candidate identities resets the counts, even when the candidate
+    count is unchanged, so array indices cannot retain another server's load.
     """
 
     def __init__(self, sample_size: int = 2) -> None:
@@ -401,7 +402,7 @@ class RendezvousHashDecodeSelector:
 
 @dataclass
 class _PressureSnapshot:
-    """某个 decode 副本最近一次 ``/metrics`` 的关键读数。"""
+    """Latest relevant ``/metrics`` readings for one decode replica."""
 
     ts: float
     kv_usage: float | None = None
@@ -417,15 +418,16 @@ def _metric_value(line: str) -> float | None:
 
 
 class _MetricsPressureCache:
-    """后台守护线程轮询每个 decode 副本的 ``/metrics``，缓存最近一次快照。
+    """Poll decode replicas' ``/metrics`` on a daemon thread and cache snapshots.
 
-    候选的 ``key`` 就是 decode 服务的 HTTP 地址（``vllm_async_server`` 里
-    ``DecodeCandidate(key=peer_id)``，peer_id 形如 ``http://host:port``），
-    而 vLLM 的 ``/metrics`` 就挂在同一个端口上，因此**不需要改 verl**。
+    A candidate key is its HTTP base address, such as ``http://host:port``.
+    The metrics endpoint uses the same address, so polling needs no additional
+    metrics RPC in the companion verl integration.
 
-    只解析 3 行：``vllm:kv_cache_usage_perc``、``vllm:num_requests_running``、
-    ``vllm:num_requests_waiting_by_reason{reason="capacity"}``。
-    线程 daemon，任何异常都吞掉并保留旧快照；``snapshot()`` 只读缓存、不阻塞事件循环。
+    Read ``vllm:kv_cache_usage_perc``, ``vllm:num_requests_running`` and
+    ``vllm:num_requests_waiting_by_reason{reason="capacity"}``.
+    Failed fetches retain the previous snapshot until it becomes stale.
+    ``snapshot()`` only reads the cache, with no network I/O on the event loop.
     """
 
     def __init__(
@@ -443,7 +445,7 @@ class _MetricsPressureCache:
         self._thread: threading.Thread | None = None
 
     def observe(self, keys: Sequence[str]) -> None:
-        """声明要轮询的候选 key 集合（集合变化时调用；首次调用启动线程）。"""
+        """Update the keys to poll, starting the thread on the first call."""
         keys = tuple(keys)
         if keys == self._keys:
             return
@@ -473,7 +475,7 @@ class _MetricsPressureCache:
         try:
             with urllib.request.urlopen(url, timeout=self._timeout) as resp:
                 body = resp.read(200_000).decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001 - 网络抖动 / 引擎睡眠都视为"暂时无快照"
+        except Exception:  # noqa: BLE001 - Network errors or sleeping engines yield no fresh snapshot.
             return None
         kv_usage = running = wait_capacity = None
         for line in body.splitlines():

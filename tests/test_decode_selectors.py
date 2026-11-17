@@ -24,7 +24,7 @@ def cands(*keys):
 
 
 class _StubPressure:
-    """测试用压力源：实现 observe/snapshot，返回预设的 kv 水位。"""
+    """Provide observe/snapshot methods with preset KV and queue pressure."""
 
     def __init__(self, kv_by_key=None, wait_by_key=None):
         self.kv_by_key = dict(kv_by_key or {})
@@ -46,7 +46,7 @@ class _StubPressure:
 
 
 class TestLeastLoad(unittest.TestCase):
-    """least_load / power_of_two：随机取 k 个候选，选在飞计数最小者。"""
+    """Sample k candidates and choose the one with the fewest in-flight calls."""
 
     def setUp(self):
         random.seed(0)
@@ -61,7 +61,7 @@ class TestLeastLoad(unittest.TestCase):
         self.assertEqual(sum(sel._pending_requests), 8)
 
     def test_avoids_loaded_peer(self):
-        sel = LeastLoadDecodeSelector(sample_size=3)  # 取满 3 个 → 必然选负载最小者
+        sel = LeastLoadDecodeSelector(sample_size=3)  # Compare all three candidates to find the minimum load.
         sel._pending_requests = [5, 0, 0]
         sel._candidate_keys = ("a", "b", "c")
         self.assertIn(sel.select({}, self.pool).key, ("b", "c"))
@@ -78,25 +78,25 @@ class TestLeastLoad(unittest.TestCase):
         sel = LeastLoadDecodeSelector()
         sel.select({}, self.pool)
         sel.select({}, self.pool)
-        other = cands("x", "y", "z")  # 同数量、不同成员
+        other = cands("x", "y", "z")  # Same count, different candidate identities.
         sel.select({}, other)
         self.assertEqual(sel._candidate_keys, ("x", "y", "z"))
         self.assertEqual(sum(sel._pending_requests), 1)
 
 
 class TestCacheAware(unittest.TestCase):
-    """cache_aware：前缀亲和 + 负载回退；同样必须做在飞计数（同事 patch 修复点）。"""
+    """Check prefix affinity, load fallback and in-flight request accounting."""
 
     def setUp(self):
         random.seed(0)
         self.pool = cands("a", "b", "c")
 
     def _req(self, prompt):
-        # 同时给出 routing_key 与 prompt_ids，兼容各策略的取值方式
+        # Supply both identity and prompt content for the selector's request contract.
         return {"routing_key": f"k-{prompt}", "prompt_ids": [prompt, prompt + 1]}
 
     def test_counts_and_release(self):
-        sel = CacheAwareDecodeSelector(cache_threshold=0.9)  # 阈值调高 → 主要走负载回退
+        sel = CacheAwareDecodeSelector(cache_threshold=0.9)  # A high match threshold favors load fallback.
         picks = [sel.select(self._req(100 + i), self.pool).key for i in range(6)]
         self.assertEqual(sum(sel._pending_requests), 6)
         self.assertGreaterEqual(len(set(picks)), 2, "no-hit requests must not all pin index 0")
@@ -204,7 +204,7 @@ class TestSessionSticky(unittest.TestCase):
 
 
 class TestStatelessStrategies(unittest.TestCase):
-    """random / consistent_hash / rendezvous_hash：只验证可用性与确定性。"""
+    """Check random candidate membership and deterministic hash-policy routing."""
 
     def setUp(self):
         random.seed(0)
