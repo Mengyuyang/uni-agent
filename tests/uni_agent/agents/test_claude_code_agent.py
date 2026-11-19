@@ -313,6 +313,26 @@ def test_claude_env_pins_enabled_subagents_to_policy_model(enable_subagents, exp
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("enable_subagents", [False, True])
+def test_cli_model_name_overrides_policy_name_for_claude_cli(enable_subagents):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(model_name="Qwen3.5-9B"),
+        cli_model_name="sonnet",
+        enable_subagents=enable_subagents,
+    )
+    agent = ClaudeCodeAgent(config)
+
+    argv = agent._claude_argv("fix the bug")
+    env = agent._claude_env("http://gateway:8000")
+
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert env["ANTHROPIC_MODEL"] == "sonnet"
+    assert env.get("CLAUDE_CODE_SUBAGENT_MODEL") == ("sonnet" if enable_subagents else None)
+    assert config.model.model_name == "Qwen3.5-9B"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_claude_argv_can_keep_slash_commands_enabled():
     config = ClaudeCodeConfig(
         model=ModelConfig(model_name="policy"),
@@ -356,3 +376,22 @@ def test_claude_env_uses_placeholders_for_session_gateway():
     assert "ANTHROPIC_API_KEY" not in env
     assert env["ANTHROPIC_AUTH_TOKEN"]
     assert env["ANTHROPIC_AUTH_TOKEN"] != "EMPTY"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("cli_model_name", [None, ""])
+def test_cli_model_name_defaults_to_policy_model(cli_model_name):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(model_name="policy"),
+        cli_model_name=cli_model_name,
+        enable_subagents=True,
+    )
+    agent = ClaudeCodeAgent(config)
+
+    argv = agent._claude_argv("fix the bug")
+    env = agent._claude_env("http://gateway:8000")
+
+    assert argv[argv.index("--model") + 1] == "policy"
+    assert env["ANTHROPIC_MODEL"] == "policy"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "policy"

@@ -65,6 +65,10 @@ class ClaudeCodeConfig(AgentConfig):
     """Black-box launch params for Claude Code (policy endpoint lives on :attr:`AgentConfig.model`)."""
 
     name: str = "claude_code"
+    cli_model_name: str | None = Field(
+        default=None,
+        description="Claude CLI model alias; defaults to model.model_name when omitted.",
+    )
     max_turns: int | None = Field(default=80, description="--max-turns budget; None to omit.")
     enable_web_tools: bool = Field(
         default=False,
@@ -174,9 +178,9 @@ class ClaudeCodeAgent(Agent):
 
     def _claude_argv(self, user_prompt: str, *, system_prompt: str | None = None) -> list[str]:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
-        model = cfg.model.model_name
+        model = cfg.cli_model_name or cfg.model.model_name
         if not model:
-            raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
+            raise ValueError("claude_code: set config.cli_model_name or config.model.model_name")
         argv = [
             "claude",
             "-p",
@@ -204,9 +208,9 @@ class ClaudeCodeAgent(Agent):
 
     def _claude_env(self, endpoint: str) -> dict[str, str]:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
-        model = cfg.model.model_name
+        model = cfg.cli_model_name or cfg.model.model_name
         if not model:
-            raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
+            raise ValueError("claude_code: set config.cli_model_name or config.model.model_name")
         auth_token = cfg.model.api_key
         if not auth_token or auth_token == "EMPTY":
             auth_token = str(uuid.uuid4())
